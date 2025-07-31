@@ -1,0 +1,1 @@
+SELECT * FROM product LIMIT 10;

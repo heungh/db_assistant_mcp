@@ -1,0 +1,3 @@
+ALTER TABLE user_info 
+ADD COLUMN phone VARCHAR(20),
+ADD COLUMN address TEXT;
