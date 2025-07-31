@@ -447,7 +447,7 @@ HTML 형식의 상세 보고서가 `output/` 디렉토리에 생성됩니다:
 ### 핵심 서버 파일
 ```
 ├── ddl_validation_qcli_mcp_server.py    # 메인 DDL 검증 MCP 서버
-└── DDL_VALIDATION_README.md             # 이 파일
+└── README.md                            # 이 파일
 ```
 
 ### SQL 테스트 파일들
@@ -478,7 +478,6 @@ HTML 형식의 상세 보고서가 `output/` 디렉토리에 생성됩니다:
 ```
 ├── output/                              # 검증 보고서 출력
 │   ├── validation_report_*.html         # HTML 형식 상세 보고서
-│   ├── validation_report_*.md           # Markdown 형식 보고서
 │   └── all_validation_report_*.html     # 전체 검증 종합 보고서
 ```
 
@@ -496,10 +495,7 @@ HTML 형식의 상세 보고서가 `output/` 디렉토리에 생성됩니다:
 ```
 ├── ssh_tunnel.sh                        # SSH 터널 스크립트
 ├── ddl_validation_agent.py              # DDL 검증 에이전트
-├── sql_validation_agent.py              # SQL 검증 에이전트
-└── backup files/                        # 백업 파일들
-    ├── ddl_validation_qcli_mcp_server backup_20250729_1.py
-    └── ddl_validation_qcli_mcp_server backup_20250729_2.py
+└── sql_validation_agent.py              # SQL 검증 에이전트
 ```
 
 ## 🔧 문제 해결
