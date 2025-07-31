@@ -481,16 +481,6 @@ HTML 형식의 상세 보고서가 `output/` 디렉토리에 생성됩니다:
 │   └── all_validation_report_*.html     # 전체 검증 종합 보고서
 ```
 
-### 테스트 스크립트들
-```
-├── test_db_connection.py                # 데이터베이스 연결 테스트
-├── test_db_connection_ssh.py            # SSH 터널 연결 테스트
-├── test_schema_analysis.py              # 스키마 분석 테스트
-├── test_detailed_schema.py              # 상세 스키마 검증 테스트
-├── test_html_report.py                  # HTML 보고서 생성 테스트
-└── test_mcp_connection.py               # MCP 서버 연결 테스트
-```
-
 ### 지원 파일
 ```
 ├── ssh_tunnel.sh                        # SSH 터널 스크립트
