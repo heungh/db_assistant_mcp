@@ -498,8 +498,8 @@ pip install mysql-connector-python
 ```
 
 #### 2. SSH 터널 설정 실패
-- SSH 키 파일 경로 확인: `/Users/heungh/test.pem`
-- SSH 서버 접근 권한 확인: `ec2-user@54.180.79.255`
+- SSH 키 파일 경로 확인: `/Users/abcdef/abcdef.pem`
+- SSH 서버 접근 권한 확인: `ec2-user@11.111.11.111
 
 #### 3. AWS 자격 증명 오류
 ```bash
