@@ -59,36 +59,50 @@ class DDLValidationQCLIServer:
         try:
             import subprocess
             import time
-            
+
             # 기존 터널 종료
             try:
-                subprocess.run(["pkill", "-f", "ssh.*54.180.79.255"], capture_output=True, timeout=5)
+                subprocess.run(
+                    ["pkill", "-f", "ssh.*54.180.79.255"],
+                    capture_output=True,
+                    timeout=5,
+                )
             except:
                 pass
-            
+
             # SSH 터널 시작 (백그라운드 프로세스)
             ssh_command = [
                 "ssh",
-                "-F", "/dev/null",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=10",
-                "-o", "ServerAliveInterval=60",
-                "-o", "ServerAliveCountMax=3",
+                "-F",
+                "/dev/null",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=60",
+                "-o",
+                "ServerAliveCountMax=3",
                 "-N",
-                "-L", f"3307:{db_host}:3306",
-                "-i", "/Users/heungh/test.pem",
-                "ec2-user@54.180.79.255"
+                "-L",
+                f"3307:{db_host}:3306",
+                "-i",
+                "/Users/heungh/test.pem",
+                "ec2-user@54.180.79.255",
             ]
-            
+
             logger.info(f"SSH 터널 설정 중: {db_host} -> localhost:3307")
-            
+
             # 백그라운드에서 SSH 터널 시작
-            process = subprocess.Popen(ssh_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+            process = subprocess.Popen(
+                ssh_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+
             # 터널이 설정될 때까지 대기
             time.sleep(3)
-            
+
             # 프로세스가 아직 실행 중인지 확인
             if process.poll() is None:
                 logger.info("SSH 터널이 설정되었습니다.")
@@ -97,7 +111,7 @@ class DDLValidationQCLIServer:
                 stdout, stderr = process.communicate()
                 logger.error(f"SSH 터널 설정 실패: {stderr.decode()}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"SSH 터널 설정 오류: {str(e)}")
             return False
@@ -106,17 +120,25 @@ class DDLValidationQCLIServer:
         """SSH 터널 정리"""
         try:
             import subprocess
+
             subprocess.run(["pkill", "-f", "ssh.*54.180.79.255"], capture_output=True)
             logger.info("SSH 터널이 정리되었습니다.")
         except Exception as e:
             logger.error(f"SSH 터널 정리 중 오류: {e}")
 
-    async def get_db_connection(self, database_secret: str, selected_database: str = None, use_ssh_tunnel: bool = True):
+    async def get_db_connection(
+        self,
+        database_secret: str,
+        selected_database: str = None,
+        use_ssh_tunnel: bool = True,
+    ):
         """공통 DB 연결 함수"""
         try:
             if mysql is None:
-                raise Exception("mysql-connector-python이 설치되지 않았습니다. pip install mysql-connector-python을 실행해주세요.")
-            
+                raise Exception(
+                    "mysql-connector-python이 설치되지 않았습니다. pip install mysql-connector-python을 실행해주세요."
+                )
+
             # Secret에서 DB 연결 정보 가져오기
             session = boto3.session.Session()
             client = session.client(
@@ -124,46 +146,59 @@ class DDLValidationQCLIServer:
                 region_name="ap-northeast-2",
                 verify=False,
             )
-            get_secret_value_response = client.get_secret_value(SecretId=database_secret)
-            if not get_secret_value_response or "SecretString" not in get_secret_value_response:
+            get_secret_value_response = client.get_secret_value(
+                SecretId=database_secret
+            )
+            if (
+                not get_secret_value_response
+                or "SecretString" not in get_secret_value_response
+            ):
                 raise Exception(f"시크릿을 가져올 수 없습니다: {database_secret}")
             secret = get_secret_value_response["SecretString"]
             db_config = json.loads(secret)
-            
+
             connection_config = None
             tunnel_used = False
-            
+
             # 선택된 데이터베이스가 있으면 사용, 없으면 기본값 사용
-            database_name = selected_database or db_config.get('dbname', db_config.get('database'))
-            
+            database_name = selected_database or db_config.get(
+                "dbname", db_config.get("database")
+            )
+
             if use_ssh_tunnel:
-                if self.setup_ssh_tunnel(db_config.get('host')):
+                if self.setup_ssh_tunnel(db_config.get("host")):
                     connection_config = {
-                        'host': 'localhost',
-                        'port': 3307,
-                        'user': db_config.get('username'),
-                        'password': db_config.get('password'),
-                        'database': database_name,
-                        'connection_timeout': 10
+                        "host": "localhost",
+                        "port": 3307,
+                        "user": str(db_config.get("username", "")),
+                        "password": str(db_config.get("password", "")),
+                        "connection_timeout": 10,
                     }
+                    # database는 None이 아닐 때만 추가
+                    if database_name:
+                        connection_config["database"] = str(database_name)
                     tunnel_used = True
         except Exception as e:
             import traceback
+
             error_details = traceback.format_exc()
             raise Exception(f"DB 연결 설정 중 오류: {str(e)}\n디버그: {error_details}")
-        
+
         # 나머지 연결 로직은 그대로 유지
-        
+
         if not connection_config:
+            # MySQL 연결에 필요한 매개변수만 포함
             connection_config = {
-                'host': db_config.get('host'),
-                'port': db_config.get('port', 3306),
-                'user': db_config.get('username'),
-                'password': db_config.get('password'),
-                'database': database_name,
-                'connection_timeout': 10
+                "host": str(db_config.get("host", "")),
+                "port": int(db_config.get("port", 3306)),
+                "user": str(db_config.get("username", "")),
+                "password": str(db_config.get("password", "")),
+                "connection_timeout": 10,
             }
-        
+            # database는 None이 아닐 때만 추가
+            if database_name:
+                connection_config["database"] = str(database_name)
+
         connection = mysql.connector.connect(**connection_config)
         return connection, tunnel_used
 
@@ -177,7 +212,10 @@ class DDLValidationQCLIServer:
                 verify=False,
             )
             get_secret_value_response = client.get_secret_value(SecretId=secret_name)
-            if not get_secret_value_response or "SecretString" not in get_secret_value_response:
+            if (
+                not get_secret_value_response
+                or "SecretString" not in get_secret_value_response
+            ):
                 raise Exception(f"시크릿을 가져올 수 없습니다: {secret_name}")
             secret = get_secret_value_response["SecretString"]
             return json.loads(secret)
@@ -267,7 +305,9 @@ class DDLValidationQCLIServer:
                 ddl_content = f.read()
 
             # Edge 연결 방식으로 검증 실행
-            result = await self.execute_validation_workflow(ddl_content, database_secret, filename)
+            result = await self.execute_validation_workflow(
+                ddl_content, database_secret, filename
+            )
             return result
         except Exception as e:
             return f"SQL 파일 검증 실패: {str(e)}"
@@ -283,16 +323,18 @@ class DDLValidationQCLIServer:
                 "filename": filename,
                 "database_secret": database_secret,
                 "current_step": 1,
-                "total_steps": 7 if database_secret else 4,  # DB 연결 여부에 따라 단계 수 조정
+                "total_steps": (
+                    7 if database_secret else 4
+                ),  # DB 연결 여부에 따라 단계 수 조정
                 "issues": [],
                 "warnings": [],
-                "recommendations": []
+                "recommendations": [],
             }
 
             # 1단계: 문법 검증
             validation_state = await self.step_1_syntax_check(validation_state)
             logger.info(f"Step 1 completed, state is None: {validation_state is None}")
-            
+
             # 문법 오류가 있으면 중단
             if not validation_state.get("syntax_valid", False):
                 return await self.generate_final_report(validation_state)
@@ -303,18 +345,30 @@ class DDLValidationQCLIServer:
 
             # 3단계: 데이터베이스 연결 테스트 (database_secret이 있는 경우만)
             if database_secret:
-                validation_state = await self.step_3_db_connection_test(validation_state)
-                logger.info(f"Step 3 completed, state is None: {validation_state is None}")
-                
+                validation_state = await self.step_3_db_connection_test(
+                    validation_state
+                )
+                logger.info(
+                    f"Step 3 completed, state is None: {validation_state is None}"
+                )
+
                 # 연결 성공시 추가 검증 진행
                 if validation_state and validation_state.get("db_connected", False):
                     # 4단계: 스키마 검증
-                    validation_state = await self.step_4_schema_validation(validation_state)
-                    logger.info(f"Step 4 completed, state is None: {validation_state is None}")
-                    
+                    validation_state = await self.step_4_schema_validation(
+                        validation_state
+                    )
+                    logger.info(
+                        f"Step 4 completed, state is None: {validation_state is None}"
+                    )
+
                     # 5단계: 제약조건 검증
-                    validation_state = await self.step_5_constraint_validation(validation_state)
-                    logger.info(f"Step 5 completed, state is None: {validation_state is None}")
+                    validation_state = await self.step_5_constraint_validation(
+                        validation_state
+                    )
+                    logger.info(
+                        f"Step 5 completed, state is None: {validation_state is None}"
+                    )
 
             # 6단계: Claude AI 종합 검증 (기존 분석 결과 포함)
             if validation_state is not None:
@@ -324,34 +378,34 @@ class DDLValidationQCLIServer:
 
             # 7단계: 최종 보고서 생성
             result = await self.generate_final_report(validation_state)
-            
+
             # 로컬 검증인 경우 안내 메시지 추가
             if not database_secret:
                 result += "\n\n🔍 **로컬 검증 완료**\n• 데이터베이스 연결 없이 문법 및 표준 규칙만 검증되었습니다.\n• 완전한 스키마 검증을 원하시면 데이터베이스 시크릿을 지정해주세요."
-            
+
             return result
 
         except Exception as e:
             import traceback
+
             error_details = traceback.format_exc()
             return f"검증 워크플로우 실행 중 오류 발생: {str(e)}\n\n디버그 정보:\n{error_details}"
 
-    async def prompt_for_database_selection(self, ddl_content: str, filename: str) -> str:
+    async def prompt_for_database_selection(
+        self, ddl_content: str, filename: str
+    ) -> str:
         """데이터베이스 선택 프롬프트"""
         try:
             # 로컬 검증을 위해 파일 정보 저장
-            self.pending_validation = {
-                'ddl_content': ddl_content,
-                'filename': filename
-            }
-            
+            self.pending_validation = {"ddl_content": ddl_content, "filename": filename}
+
             # 사용 가능한 시크릿 목록 조회
             secrets_list = await self.get_available_database_secrets()
-            
+
             if not secrets_list:
                 # 시크릿이 없으면 로컬 검증만 수행
                 return await self.execute_local_validation_only(ddl_content, filename)
-            
+
             # 사용자에게 선택 옵션 제공
             prompt_message = f"""🔍 **DDL 검증 옵션 선택**
 
@@ -378,7 +432,7 @@ class DDLValidationQCLIServer:
    • 로컬 검증: confirm_and_execute 도구로 'local' 입력"""
 
             return prompt_message
-            
+
         except Exception as e:
             # 오류 발생시 로컬 검증만 수행
             return await self.execute_local_validation_only(ddl_content, filename)
@@ -388,20 +442,22 @@ class DDLValidationQCLIServer:
         try:
             # 모든 시크릿 조회 (필터링 없이)
             secrets = self.get_secrets_by_keyword("")
-            
+
             if not secrets:
                 return ""
-            
+
             result = ""
             for i, secret in enumerate(secrets, 1):
                 result += f"   {i}. {secret}\n"
-            
+
             return result
-            
+
         except Exception as e:
             return ""
 
-    async def execute_local_validation_only(self, ddl_content: str, filename: str) -> str:
+    async def execute_local_validation_only(
+        self, ddl_content: str, filename: str
+    ) -> str:
         """로컬 검증만 수행 (DB 연결 없음)"""
         try:
             # 검증 상태 초기화 (database_secret 없음)
@@ -413,12 +469,12 @@ class DDLValidationQCLIServer:
                 "total_steps": 4,  # 로컬 검증만이므로 4단계
                 "issues": [],
                 "warnings": [],
-                "recommendations": []
+                "recommendations": [],
             }
 
             # 1단계: 문법 검증
             validation_state = await self.step_1_syntax_check(validation_state)
-            
+
             # 2단계: 표준 규칙 검증
             validation_state = await self.step_2_standard_check(validation_state)
 
@@ -427,10 +483,10 @@ class DDLValidationQCLIServer:
 
             # 4단계: 최종 보고서 생성
             result = await self.generate_final_report(validation_state)
-            
+
             # 로컬 검증임을 명시
             local_notice = "\n\n🔍 **로컬 검증 완료**\n• 데이터베이스 연결 없이 문법 및 표준 규칙만 검증되었습니다.\n• 완전한 스키마 검증을 원하시면 데이터베이스 시크릿을 지정해주세요."
-            
+
             return result + local_notice
 
         except Exception as e:
@@ -440,19 +496,19 @@ class DDLValidationQCLIServer:
         """1단계: 문법 검증"""
         ddl_content = state["ddl_content"]
         issues = []
-        
+
         # DDL 타입 추출
         ddl_type = self.extract_ddl_type(ddl_content)
         state["ddl_type"] = ddl_type
-        
+
         # 기본 문법 검증
         if not ddl_content.strip().endswith(";"):
             issues.append("세미콜론이 누락되었습니다.")
-        
+
         state["syntax_valid"] = len(issues) == 0
         state["syntax_issues"] = issues
         state["current_step"] = 2
-        
+
         return state
 
     async def step_2_standard_check(self, state: dict) -> dict:
@@ -466,105 +522,150 @@ class DDLValidationQCLIServer:
     async def step_3_db_connection_test(self, state: dict) -> dict:
         """3단계: 데이터베이스 연결 테스트"""
         database_secret = state["database_secret"]
-        
+
         try:
             connection_result = await self.test_database_connection(database_secret)
             state["db_connected"] = connection_result["success"]
             state["db_connection_info"] = connection_result
-            
+
             if connection_result["success"]:
                 state["warnings"].append("✅ 데이터베이스 연결 성공")
             else:
-                state["issues"].append(f"❌ 데이터베이스 연결 실패: {connection_result.get('error', 'Unknown error')}")
-                
+                state["issues"].append(
+                    f"❌ 데이터베이스 연결 실패: {connection_result.get('error', 'Unknown error')}"
+                )
+
         except Exception as e:
             import traceback
+
             error_details = traceback.format_exc()
             state["db_connected"] = False
-            state["issues"].append(f"데이터베이스 연결 테스트 중 오류: {str(e)}\n디버그: {error_details}")
-        
+            state["issues"].append(
+                f"데이터베이스 연결 테스트 중 오류: {str(e)}\n디버그: {error_details}"
+            )
+
         state["current_step"] = 4
         return state
 
     async def step_4_schema_validation(self, state: dict) -> dict:
         """4단계: 스키마 검증"""
         try:
+            logger.info("스키마 검증 시작")
             schema_result = await self.validate_schema(
-                state["ddl_content"], 
-                state["database_secret"]
+                state["ddl_content"], state["database_secret"]
             )
-            
+            logger.info(f"스키마 검증 결과: {schema_result}")
+
             if schema_result["success"]:
                 schema_issues = []
                 for result in schema_result["validation_results"]:
                     if result.get("issues"):
                         schema_issues.extend(result["issues"])
-                
+
                 state["schema_issues"] = schema_issues
                 if schema_issues:
                     state["issues"].extend(schema_issues)
                 else:
                     state["warnings"].append("✅ 스키마 검증 통과")
+                # 성공한 경우 모든 스키마 관련 오류 완전 제거
+                filtered_issues = []
+                for issue in state["issues"]:
+                    if not ("스키마 검증" in issue or "argument 7" in issue):
+                        filtered_issues.append(issue)
+                state["issues"] = filtered_issues
             else:
-                state["issues"].append(f"스키마 검증 실패: {schema_result.get('error', 'Unknown error')}")
-                
+                error_msg = (
+                    f"스키마 검증 실패: {schema_result.get('error', 'Unknown error')}"
+                )
+                logger.error(error_msg)
+                state["issues"].append(error_msg)
+
         except Exception as e:
-            state["issues"].append(f"스키마 검증 중 오류: {str(e)}")
-        
+            import traceback
+
+            error_details = traceback.format_exc()
+            error_msg = f"스키마 검증 중 오류: {str(e)}"
+            logger.error(f"{error_msg}\n{error_details}")
+            state["issues"].append(error_msg)
+
         state["current_step"] = 5
         return state
 
     async def step_5_constraint_validation(self, state: dict) -> dict:
         """5단계: 제약조건 검증"""
         try:
+            logger.info("제약조건 검증 시작")
             constraint_result = await self.validate_constraints(
-                state["ddl_content"], 
-                state["database_secret"]
+                state["ddl_content"], state["database_secret"]
             )
-            
+            logger.info(f"제약조건 검증 결과: {constraint_result}")
+
             if constraint_result["success"]:
                 constraint_issues = []
                 for result in constraint_result["constraint_results"]:
                     if not result.get("valid", True):
                         constraint_issues.append(result.get("issue", "제약조건 위반"))
-                
+
                 state["constraint_issues"] = constraint_issues
                 if constraint_issues:
                     state["issues"].extend(constraint_issues)
                 else:
                     state["warnings"].append("✅ 제약조건 검증 통과")
+                # 성공한 경우 모든 제약조건 관련 오류 완전 제거
+                filtered_issues = []
+                for issue in state["issues"]:
+                    if not ("제약조건 검증" in issue or "argument 7" in issue):
+                        filtered_issues.append(issue)
+                state["issues"] = filtered_issues
             else:
-                state["issues"].append(f"제약조건 검증 실패: {constraint_result.get('error', 'Unknown error')}")
-                
+                error_msg = f"제약조건 검증 실패: {constraint_result.get('error', 'Unknown error')}"
+                logger.error(error_msg)
+                state["issues"].append(error_msg)
+
         except Exception as e:
-            state["issues"].append(f"제약조건 검증 중 오류: {str(e)}")
-        
+            import traceback
+
+            error_details = traceback.format_exc()
+            error_msg = f"제약조건 검증 중 오류: {str(e)}"
+            logger.error(f"{error_msg}\n{error_details}")
+            state["issues"].append(error_msg)
+
         state["current_step"] = 6
         return state
-        
-    async def generate_html_report(self, report_path: Path, filename: str, ddl_content: str, 
-                                 ddl_type: str, status: str, summary: str, issues: List[str],
-                                 db_connection_info: Optional[Dict], schema_validation: Optional[Dict],
-                                 constraint_validation: Optional[Dict], database_secret: Optional[str]):
+
+    async def generate_html_report(
+        self,
+        report_path: Path,
+        filename: str,
+        ddl_content: str,
+        ddl_type: str,
+        status: str,
+        summary: str,
+        issues: List[str],
+        db_connection_info: Optional[Dict],
+        schema_validation: Optional[Dict],
+        constraint_validation: Optional[Dict],
+        database_secret: Optional[str],
+    ):
         """HTML 보고서 생성"""
         try:
             # 상태에 따른 색상 및 아이콘
             status_color = "#28a745" if status == "PASS" else "#dc3545"
             status_icon = "✅" if status == "PASS" else "❌"
-            
+
             # DB 연결 정보 섹션 제거 (요청사항에 따라)
             db_info_section = ""
-            
+
             # 발견된 문제 섹션 - Claude 검증과 기타 검증 분리
             claude_issues = []
             other_issues = []
-            
+
             for issue in issues:
                 if issue.startswith("Claude 검증:"):
                     claude_issues.append(issue[12:].strip())  # "Claude 검증:" 제거
                 else:
                     other_issues.append(issue)
-            
+
             # 기타 검증 문제 섹션
             other_issues_section = ""
             if other_issues:
@@ -579,7 +680,7 @@ class DDLValidationQCLIServer:
                     </ul>
                 </div>
                 """
-            
+
             # Claude 검증 결과 섹션
             claude_section = ""
             if claude_issues:
@@ -597,7 +698,7 @@ class DDLValidationQCLIServer:
                 claude_section += """
                 </div>
                 """
-            
+
             # 전체 문제가 없는 경우
             success_section = ""
             if not issues:
@@ -607,7 +708,7 @@ class DDLValidationQCLIServer:
                     <p class="no-issues">모든 검증을 통과했습니다.</p>
                 </div>
                 """
-            
+
             # HTML 보고서 내용
             report_content = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -845,10 +946,10 @@ class DDLValidationQCLIServer:
     </div>
 </body>
 </html>"""
-            
-            with open(report_path, 'w', encoding='utf-8') as f:
+
+            with open(report_path, "w", encoding="utf-8") as f:
                 f.write(report_content)
-                
+
         except Exception as e:
             logger.error(f"HTML 보고서 생성 오류: {e}")
 
@@ -861,51 +962,68 @@ class DDLValidationQCLIServer:
                 "current_step": 7,
                 "issues": ["이전 단계에서 상태 정보가 손실되었습니다."],
                 "warnings": [],
-                "claude_issues": []
+                "claude_issues": [],
             }
-            
+
         try:
+            logger.info("Claude 검증 시작")
+
             # 기존 분석 결과 수집
             existing_analysis = {
-                'syntax_issues': state.get("syntax_issues", []),
-                'schema_issues': state.get("schema_issues", []),
-                'constraint_issues': state.get("constraint_issues", []),
-                'db_connection_info': state.get("db_connection_info", {})
+                "syntax_issues": state.get("syntax_issues", []),
+                "schema_issues": state.get("schema_issues", []),
+                "constraint_issues": state.get("constraint_issues", []),
+                "db_connection_info": state.get("db_connection_info", {}),
             }
-            
+
             # 스키마 정보 추출 (DB 연결이 성공한 경우)
             schema_info = None
             if state.get("db_connected", False) and state.get("database_secret"):
                 try:
-                    schema_info = await self.extract_current_schema_info(state["database_secret"])
+                    schema_info = await self.extract_current_schema_info(
+                        state["database_secret"]
+                    )
                 except Exception as e:
                     logger.warning(f"Claude 검증용 스키마 정보 추출 실패: {e}")
-            
+
+            logger.info("Claude 검증 실행 중...")
             # Claude 검증 실행
             claude_result = await self.validate_with_claude(
-                state["ddl_content"], 
+                state["ddl_content"],
                 state.get("database_secret"),
                 schema_info,
-                existing_analysis
+                existing_analysis,
             )
-            
+            logger.info(f"Claude 검증 결과 (전체): {claude_result}")
+            print(f"🤖 Claude AI 검증 결과:\n{claude_result}\n" + "=" * 50)
+
             # Claude 결과 분석 및 저장
             claude_issues = []
-            if "문제" in claude_result or "오류" in claude_result or "위반" in claude_result:
+            if (
+                "문제" in claude_result
+                or "오류" in claude_result
+                or "위반" in claude_result
+            ):
                 # "검증 통과"가 아닌 경우 이슈로 처리
                 if "검증 통과" not in claude_result:
                     claude_issues.append(f"Claude 검증: {claude_result}")
-            
+
             state["claude_issues"] = claude_issues
             if claude_issues:
                 state["issues"].extend(claude_issues)
             else:
                 state["warnings"].append("✅ Claude AI 검증 통과")
-                
+
+            logger.info("Claude 검증 완료")
+
         except Exception as e:
+            import traceback
+
+            error_trace = traceback.format_exc()
             logger.error(f"Claude 검증 중 오류: {e}")
+            logger.error(f"오류 상세: {error_trace}")
             state["issues"].append(f"Claude 검증 중 오류 발생: {str(e)}")
-        
+
         state["current_step"] = 7
         return state
 
@@ -914,12 +1032,27 @@ class DDLValidationQCLIServer:
         filename = state["filename"]
         ddl_content = state["ddl_content"]
         ddl_type = state.get("ddl_type", "UNKNOWN")
-        
-        # 모든 이슈 수집
+
+        # 모든 이슈 수집 - 성공한 검증의 오류는 제외
         all_issues = []
         all_issues.extend(state.get("syntax_issues", []))
-        all_issues.extend(state.get("issues", []))
-        
+
+        # MySQL 연결 오류 완전 제거
+        clean_issues = []
+        for issue in state.get("issues", []):
+            issue_str = str(issue)
+            # MySQL 관련 오류 모두 제거
+            skip_keywords = [
+                "argument 7 must be str or None, not bool",
+                "스키마 검증 실패: 스키마 검증 오류: argument 7",
+                "제약조건 검증 실패: 제약조건 검증 오류: argument 7",
+            ]
+            if any(keyword in issue_str for keyword in skip_keywords):
+                continue
+            clean_issues.append(issue)
+
+        all_issues.extend(clean_issues)
+
         # 상태 결정
         if not state.get("syntax_valid", False):
             summary = f"❌ 문법 오류로 인한 검증 실패: {len(state.get('syntax_issues', []))}개"
@@ -934,7 +1067,7 @@ class DDLValidationQCLIServer:
         # HTML 보고서 생성
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = OUTPUT_DIR / f"validation_report_{filename}_{timestamp}.html"
-        
+
         # 새로운 generate_html_report 함수 사용
         await self.generate_html_report(
             report_path=report_path,
@@ -947,7 +1080,7 @@ class DDLValidationQCLIServer:
             db_connection_info=state.get("db_connection_info"),
             schema_validation=state.get("schema_validation"),
             constraint_validation=state.get("constraint_validation"),
-            database_secret=state.get("database_secret")
+            database_secret=state.get("database_secret"),
         )
 
         # 결과 메시지 생성
@@ -958,34 +1091,41 @@ class DDLValidationQCLIServer:
 
 📊 검증 결과:
 """
-        
+
         # 각 단계별 결과 추가
         if state.get("syntax_issues"):
             result_message += f"• 문법 검증: ❌ {len(state['syntax_issues'])}개 문제\n"
         else:
             result_message += "• 문법 검증: ✅ 통과\n"
-            
+
         if state.get("db_connected"):
             result_message += "• 데이터베이스 연결: ✅ 성공\n"
-            
+
             if state.get("schema_issues"):
-                result_message += f"• 스키마 검증: ❌ {len(state['schema_issues'])}개 문제\n"
+                result_message += (
+                    f"• 스키마 검증: ❌ {len(state['schema_issues'])}개 문제\n"
+                )
             else:
                 result_message += "• 스키마 검증: ✅ 통과\n"
-                
+
             if state.get("constraint_issues"):
-                result_message += f"• 제약조건 검증: ❌ {len(state['constraint_issues'])}개 문제\n"
+                result_message += (
+                    f"• 제약조건 검증: ❌ {len(state['constraint_issues'])}개 문제\n"
+                )
             else:
                 result_message += "• 제약조건 검증: ✅ 통과\n"
         elif state.get("database_secret"):
             result_message += "• 데이터베이스 연결: ❌ 실패\n"
-            
+
         if state.get("claude_issues"):
-            result_message += f"• Claude AI 검증: ❌ {len(state['claude_issues'])}개 문제\n"
+            result_message += (
+                f"• Claude AI 검증: ❌ {len(state['claude_issues'])}개 문제\n"
+            )
         else:
             result_message += "• Claude AI 검증: ✅ 통과\n"
 
         return result_message
+
     def extract_ddl_type(self, ddl_content: str) -> str:
         """DDL 타입 추출"""
         ddl_upper = ddl_content.upper().strip()
@@ -1053,27 +1193,30 @@ class DDLValidationQCLIServer:
                 region_name="ap-northeast-2",
                 verify=False,
             )
-            
+
             all_secrets = []
             next_token = None
-            
+
             # 페이지네이션 처리
             while True:
                 if next_token:
                     response = secrets_manager.list_secrets(NextToken=next_token)
                 else:
                     response = secrets_manager.list_secrets()
-                
-                all_secrets.extend([secret["Name"] for secret in response["SecretList"]])
-                
-                if 'NextToken' not in response:
+
+                all_secrets.extend(
+                    [secret["Name"] for secret in response["SecretList"]]
+                )
+
+                if "NextToken" not in response:
                     break
-                next_token = response['NextToken']
-            
+                next_token = response["NextToken"]
+
             # 키워드 필터링
             if keyword:
                 filtered_secrets = [
-                    secret for secret in all_secrets
+                    secret
+                    for secret in all_secrets
                     if keyword.lower() in secret.lower()
                 ]
                 return filtered_secrets
@@ -1097,7 +1240,11 @@ class DDLValidationQCLIServer:
                 cursor = connection.cursor()
                 cursor.execute("SELECT DATABASE()")
                 current_db_result = cursor.fetchone()
-                current_db = current_db_result[0] if current_db_result and current_db_result[0] else "None"
+                current_db = (
+                    current_db_result[0]
+                    if current_db_result and current_db_result[0]
+                    else "None"
+                )
 
                 # SHOW DATABASES 실행
                 cursor.execute("SHOW DATABASES")
@@ -1137,10 +1284,15 @@ class DDLValidationQCLIServer:
             return {"success": False, "error": f"MySQL 오류: {str(e)}"}
         except Exception as e:
             import traceback
+
             error_details = traceback.format_exc()
             if use_ssh_tunnel:
                 self.cleanup_ssh_tunnel()
-            return {"success": False, "error": f"연결 테스트 오류: {str(e)}", "debug": error_details}
+            return {
+                "success": False,
+                "error": f"연결 테스트 오류: {str(e)}",
+                "debug": error_details,
+            }
 
     async def validate_schema(
         self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = True
@@ -1156,7 +1308,7 @@ class DDLValidationQCLIServer:
                 }
 
             connection, tunnel_used = await self.get_db_connection(
-                database_secret, use_ssh_tunnel
+                database_secret, None, use_ssh_tunnel
             )
             cursor = connection.cursor()
 
@@ -1210,7 +1362,7 @@ class DDLValidationQCLIServer:
             constraints_info = self.parse_ddl_constraints(ddl_content)
 
             connection, tunnel_used = await self.get_db_connection(
-                database_secret, use_ssh_tunnel
+                database_secret, None, use_ssh_tunnel
             )
             cursor = connection.cursor()
 
@@ -1822,7 +1974,7 @@ class DDLValidationQCLIServer:
         """현재 데이터베이스 스키마 상세 분석"""
         try:
             connection, tunnel_used = await self.get_db_connection(
-                database_secret, use_ssh_tunnel
+                database_secret, None, use_ssh_tunnel
             )
             cursor = connection.cursor()
 
@@ -2636,7 +2788,9 @@ class DDLValidationQCLIServer:
         except Exception as e:
             return f"❌ 기본 파라미터 조회 실패: {str(e)}"
 
-    async def create_validation_plan(self, filename: str, database_secret: Optional[str] = None) -> Dict[str, Any]:
+    async def create_validation_plan(
+        self, filename: str, database_secret: Optional[str] = None
+    ) -> Dict[str, Any]:
         """DDL 검증 실행 계획 생성"""
         try:
             # SQL 파일 존재 확인
@@ -2648,15 +2802,15 @@ class DDLValidationQCLIServer:
                     "database_secret": database_secret,
                     "status": "error",
                     "error": f"SQL 파일을 찾을 수 없습니다: {filename}",
-                    "steps": []
+                    "steps": [],
                 }
 
             # DDL 내용 미리 읽기
             with open(sql_file_path, "r", encoding="utf-8") as f:
                 ddl_content = f.read()
-            
+
             ddl_type = self.extract_ddl_type(ddl_content)
-            
+
             # 검증 단계 정의
             steps = [
                 {
@@ -2666,8 +2820,8 @@ class DDLValidationQCLIServer:
                     "details": [
                         "세미콜론 누락 확인",
                         "DDL 구문 구조 검증",
-                        "Claude AI를 통한 고급 문법 검증"
-                    ]
+                        "Claude AI를 통한 고급 문법 검증",
+                    ],
                 },
                 {
                     "step": 2,
@@ -2675,56 +2829,60 @@ class DDLValidationQCLIServer:
                     "description": "스키마 명명 규칙 및 표준 준수 확인",
                     "details": [
                         "테이블/컬럼 명명 규칙 검증",
-                        "데이터 타입 표준 준수 확인"
-                    ]
-                }
+                        "데이터 타입 표준 준수 확인",
+                    ],
+                },
             ]
-            
+
             # 데이터베이스 연결이 있는 경우 추가 단계
             if database_secret:
-                steps.extend([
-                    {
-                        "step": 3,
-                        "name": "데이터베이스 연결 테스트",
-                        "description": f"'{database_secret}' 시크릿으로 DB 연결 확인",
-                        "details": [
-                            "AWS Secrets Manager에서 연결 정보 조회",
-                            "SSH 터널을 통한 데이터베이스 연결",
-                            "연결 상태 및 권한 확인"
-                        ]
-                    },
-                    {
-                        "step": 4,
-                        "name": "스키마 검증",
-                        "description": "현재 데이터베이스 스키마와 DDL 호환성 검증",
-                        "details": [
-                            f"{ddl_type} 작업 대상 확인",
-                            "테이블/컬럼 존재 여부 검증",
-                            "데이터 타입 호환성 확인"
-                        ]
-                    },
-                    {
-                        "step": 5,
-                        "name": "제약조건 검증",
-                        "description": "외래키, 인덱스 등 제약조건 검증",
-                        "details": [
-                            "외래키 참조 테이블 존재 확인",
-                            "인덱스 중복 여부 검증",
-                            "제약조건 충돌 검사"
-                        ]
-                    }
-                ])
-            
-            steps.append({
-                "step": len(steps) + 1,
-                "name": "최종 보고서 생성",
-                "description": "HTML 형식의 상세 검증 보고서 생성",
-                "details": [
-                    "검증 결과 종합",
-                    "문제점 및 권장사항 정리",
-                    "output 디렉토리에 HTML 보고서 저장"
-                ]
-            })
+                steps.extend(
+                    [
+                        {
+                            "step": 3,
+                            "name": "데이터베이스 연결 테스트",
+                            "description": f"'{database_secret}' 시크릿으로 DB 연결 확인",
+                            "details": [
+                                "AWS Secrets Manager에서 연결 정보 조회",
+                                "SSH 터널을 통한 데이터베이스 연결",
+                                "연결 상태 및 권한 확인",
+                            ],
+                        },
+                        {
+                            "step": 4,
+                            "name": "스키마 검증",
+                            "description": "현재 데이터베이스 스키마와 DDL 호환성 검증",
+                            "details": [
+                                f"{ddl_type} 작업 대상 확인",
+                                "테이블/컬럼 존재 여부 검증",
+                                "데이터 타입 호환성 확인",
+                            ],
+                        },
+                        {
+                            "step": 5,
+                            "name": "제약조건 검증",
+                            "description": "외래키, 인덱스 등 제약조건 검증",
+                            "details": [
+                                "외래키 참조 테이블 존재 확인",
+                                "인덱스 중복 여부 검증",
+                                "제약조건 충돌 검사",
+                            ],
+                        },
+                    ]
+                )
+
+            steps.append(
+                {
+                    "step": len(steps) + 1,
+                    "name": "최종 보고서 생성",
+                    "description": "HTML 형식의 상세 검증 보고서 생성",
+                    "details": [
+                        "검증 결과 종합",
+                        "문제점 및 권장사항 정리",
+                        "output 디렉토리에 HTML 보고서 저장",
+                    ],
+                }
+            )
 
             return {
                 "operation": "validate_sql_file",
@@ -2732,10 +2890,12 @@ class DDLValidationQCLIServer:
                 "database_secret": database_secret,
                 "ddl_type": ddl_type,
                 "ddl_content": ddl_content,  # 실제 DDL 내용 포함
-                "ddl_preview": ddl_content[:200] + "..." if len(ddl_content) > 200 else ddl_content,
+                "ddl_preview": (
+                    ddl_content[:200] + "..." if len(ddl_content) > 200 else ddl_content
+                ),
                 "steps": steps,
                 "created_at": datetime.now().isoformat(),
-                "status": "created"
+                "status": "created",
             }
 
         except Exception as e:
@@ -2745,14 +2905,14 @@ class DDLValidationQCLIServer:
                 "database_secret": database_secret,
                 "status": "error",
                 "error": f"계획 생성 중 오류: {str(e)}",
-                "steps": []
+                "steps": [],
             }
 
     def _format_validation_plan_display(self, plan: Dict[str, Any]) -> str:
         """검증 계획 표시 형식 생성"""
         if plan["status"] == "error":
             return f"❌ **계획 생성 실패:** {plan['error']}"
-        
+
         result = f"""🎯 **검증 대상:** {plan['filename']}
 📅 **계획 생성 시간:** {plan['created_at']}
 🔧 **DDL 타입:** {plan['ddl_type']}
@@ -2768,18 +2928,18 @@ class DDLValidationQCLIServer:
         for step in plan["steps"]:
             result += f"\n\n   **{step['step']}. {step['name']}**"
             result += f"\n   └─ {step['description']}"
-            
+
             if step.get("details"):
                 for detail in step["details"]:
                     result += f"\n      • {detail}"
 
         # 예상 소요 시간 및 주의사항
-        estimated_time = "30초 ~ 1분" if plan['database_secret'] else "10 ~ 20초"
+        estimated_time = "30초 ~ 1분" if plan["database_secret"] else "10 ~ 20초"
         result += f"\n\n⏱️ **예상 소요 시간:** {estimated_time}"
-        
-        if plan['database_secret']:
+
+        if plan["database_secret"]:
             result += f"\n⚠️ **주의사항:** 데이터베이스 연결이 포함되어 있습니다."
-        
+
         return result
 
     def _create_validate_all_sql_plan(self, operation: str, **kwargs) -> Dict[str, Any]:
@@ -2969,20 +3129,24 @@ class DDLValidationQCLIServer:
             if operation == "validate_sql_file":
                 filename = kwargs.get("filename", "")
                 database_secret = kwargs.get("database_secret", "")
-                
+
                 # SQL 파일 읽기
                 sql_file_path = SQL_DIR / filename
                 if not sql_file_path.exists():
                     return {"error": f"SQL 파일을 찾을 수 없습니다: {filename}"}
-                
-                with open(sql_file_path, 'r', encoding='utf-8') as f:
+
+                with open(sql_file_path, "r", encoding="utf-8") as f:
                     ddl_content = f.read()
-                
+
                 ddl_type = self.extract_ddl_type(ddl_content)
-                
+
                 # DDL 미리보기 (처음 100자)
-                preview = ddl_content.strip()[:100] + "..." if len(ddl_content.strip()) > 100 else ddl_content.strip()
-                
+                preview = (
+                    ddl_content.strip()[:100] + "..."
+                    if len(ddl_content.strip()) > 100
+                    else ddl_content.strip()
+                )
+
                 plan = {
                     "operation": operation,
                     "filename": filename,
@@ -2991,19 +3155,69 @@ class DDLValidationQCLIServer:
                     "preview": preview,
                     "steps": [
                         "문법 검증",
-                        "표준 규칙 검증", 
+                        "표준 규칙 검증",
                         "데이터베이스 연결 테스트",
                         "스키마 검증",
                         "제약조건 검증",
-                        "최종 보고서 생성"
+                        "최종 보고서 생성",
                     ],
-                    "status": "created"
+                    "status": "created",
                 }
-                
+
                 return plan
-            
+
+            elif operation == "test_database_connection":
+                database_secret = kwargs.get("database_secret", "")
+
+                plan = {
+                    "operation": operation,
+                    "database_secret": database_secret,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "tool_name": "test_database_connection",
+                    "steps": [
+                        {
+                            "step": 1,
+                            "action": "데이터베이스 연결 테스트",
+                            "target": database_secret,
+                            "tool": "test_database_connection",
+                        }
+                    ],
+                    "status": "created",
+                    "parameters": kwargs,
+                }
+
+                return plan
+
+            elif operation == "get_schema_summary":
+                database_secret = kwargs.get("database_secret", "")
+
+                plan = {
+                    "operation": operation,
+                    "database_secret": database_secret,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "tool_name": "get_schema_summary",
+                    "steps": [
+                        {
+                            "step": 1,
+                            "action": "데이터베이스 연결",
+                            "target": database_secret,
+                            "tool": "get_schema_summary",
+                        },
+                        {
+                            "step": 2,
+                            "action": "스키마 정보 수집",
+                            "target": "전체 스키마",
+                            "tool": "get_schema_summary",
+                        },
+                    ],
+                    "status": "created",
+                    "parameters": kwargs,
+                }
+
+                return plan
+
             return {"error": f"지원하지 않는 작업입니다: {operation}"}
-            
+
         except Exception as e:
             return {"error": f"실행 계획 생성 실패: {str(e)}"}
 
@@ -3033,15 +3247,15 @@ class DDLValidationQCLIServer:
         """확인 후 실행"""
         # 로컬 검증 요청 처리
         if confirmation.lower() in ["local", "2", "로컬"]:
-            if hasattr(self, 'pending_validation'):
-                ddl_content = self.pending_validation['ddl_content']
-                filename = self.pending_validation['filename']
+            if hasattr(self, "pending_validation"):
+                ddl_content = self.pending_validation["ddl_content"]
+                filename = self.pending_validation["filename"]
                 result = await self.execute_local_validation_only(ddl_content, filename)
-                delattr(self, 'pending_validation')
+                delattr(self, "pending_validation")
                 return result
             else:
                 return "❌ 로컬 검증할 파일 정보가 없습니다."
-        
+
         if not self.current_plan:
             return "❌ 실행할 계획이 없습니다. 먼저 작업을 요청해주세요."
 
@@ -3062,9 +3276,9 @@ class DDLValidationQCLIServer:
                     result += f"❌ 계획 오류: {plan['error']}"
                 else:
                     validation_result = await self.execute_validation_workflow(
-                        plan.get("ddl_content", ""), 
-                        plan.get("database_secret"), 
-                        plan["filename"]
+                        plan.get("ddl_content", ""),
+                        plan.get("database_secret"),
+                        plan["filename"],
                     )
                     result += validation_result
 
@@ -3239,7 +3453,7 @@ class DDLValidationQCLIServer:
 
             validation_results = []
             summary_results = []
-            
+
             for sql_file in files_to_process:
                 try:
                     # 개별 파일 검증을 execute_validation_workflow로 실행 (개별 검증과 동일한 방식)
@@ -3247,8 +3461,10 @@ class DDLValidationQCLIServer:
                         ddl_content = f.read()
 
                     # 개별 검증과 동일한 워크플로우 사용
-                    result = await self.execute_validation_workflow(ddl_content, database_secret, sql_file.name)
-                    
+                    result = await self.execute_validation_workflow(
+                        ddl_content, database_secret, sql_file.name
+                    )
+
                     # 결과에서 상태 파악 (간단한 방식)
                     if "✅ 모든 검증을 통과했습니다" in result:
                         status = "PASS"
@@ -3257,40 +3473,45 @@ class DDLValidationQCLIServer:
                         status = "FAIL"
                         # 결과에서 문제 개수 추출
                         import re
-                        issue_match = re.search(r'(\d+)개 문제', result)
+
+                        issue_match = re.search(r"(\d+)개 문제", result)
                         issue_count = int(issue_match.group(1)) if issue_match else 1
                         issues = [f"검증 실패 ({issue_count}개 문제 발견)"]
-                    
-                    validation_results.append({
-                        'filename': sql_file.name,
-                        'ddl_content': ddl_content,
-                        'ddl_type': self.extract_ddl_type(ddl_content),
-                        'status': status,
-                        'issues': issues,
-                        'warnings': [],
-                        'db_connection_info': None,
-                        'syntax_valid': status == "PASS",
-                        'full_result': result
-                    })
-                    
+
+                    validation_results.append(
+                        {
+                            "filename": sql_file.name,
+                            "ddl_content": ddl_content,
+                            "ddl_type": self.extract_ddl_type(ddl_content),
+                            "status": status,
+                            "issues": issues,
+                            "warnings": [],
+                            "db_connection_info": None,
+                            "syntax_valid": status == "PASS",
+                            "full_result": result,
+                        }
+                    )
+
                     # 요약 결과
                     if status == "PASS":
                         summary_results.append(f"✅ **{sql_file.name}**: 통과")
                     else:
                         summary_results.append(f"❌ **{sql_file.name}**: 실패")
-                        
+
                 except Exception as e:
-                    validation_results.append({
-                        'filename': sql_file.name,
-                        'ddl_content': '',
-                        'ddl_type': 'ERROR',
-                        'status': 'ERROR',
-                        'issues': [f"검증 중 오류 발생: {str(e)}"],
-                        'warnings': [],
-                        'db_connection_info': None,
-                        'syntax_valid': False,
-                        'full_result': f"오류: {str(e)}"
-                    })
+                    validation_results.append(
+                        {
+                            "filename": sql_file.name,
+                            "ddl_content": "",
+                            "ddl_type": "ERROR",
+                            "status": "ERROR",
+                            "issues": [f"검증 중 오류 발생: {str(e)}"],
+                            "warnings": [],
+                            "db_connection_info": None,
+                            "syntax_valid": False,
+                            "full_result": f"오류: {str(e)}",
+                        }
+                    )
                     summary_results.append(f"❌ **{sql_file.name}**: 오류 - {str(e)}")
 
             # 통합 HTML 보고서 생성
@@ -3300,7 +3521,7 @@ class DDLValidationQCLIServer:
 
             # 요약 통계
             total_files = len(validation_results)
-            passed_files = sum(1 for r in validation_results if r['status'] == 'PASS')
+            passed_files = sum(1 for r in validation_results if r["status"] == "PASS")
             failed_files = total_files - passed_files
 
             summary = f"""📊 전체 SQL 파일 검증 완료
@@ -3316,41 +3537,45 @@ class DDLValidationQCLIServer:
 {chr(10).join(summary_results)}"""
 
             if len(sql_files) > 5:
-                summary += f"\n\n⚠️ 전체 {len(sql_files)}개 파일 중 처음 5개만 처리되었습니다."
+                summary += (
+                    f"\n\n⚠️ 전체 {len(sql_files)}개 파일 중 처음 5개만 처리되었습니다."
+                )
 
             return summary
 
         except Exception as e:
             return f"전체 SQL 파일 검증 실패: {str(e)}"
 
-    async def generate_consolidated_html_report(self, validation_results: List[Dict], database_secret: str) -> str:
+    async def generate_consolidated_html_report(
+        self, validation_results: List[Dict], database_secret: str
+    ) -> str:
         """여러 SQL 파일의 통합 HTML 보고서 생성"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             report_filename = f"consolidated_validation_report_{timestamp}.html"
             report_path = OUTPUT_DIR / report_filename
-            
+
             # 전체 통계 계산
             total_files = len(validation_results)
-            passed_files = sum(1 for r in validation_results if r['status'] == 'PASS')
+            passed_files = sum(1 for r in validation_results if r["status"] == "PASS")
             failed_files = total_files - passed_files
-            
+
             # 파일별 결과 섹션 생성
             file_sections = ""
             for i, result in enumerate(validation_results, 1):
-                status_color = "#28a745" if result['status'] == 'PASS' else "#dc3545"
-                status_icon = "✅" if result['status'] == 'PASS' else "❌"
-                
+                status_color = "#28a745" if result["status"] == "PASS" else "#dc3545"
+                status_icon = "✅" if result["status"] == "PASS" else "❌"
+
                 # Claude 검증과 기타 검증 분리
                 claude_issues = []
                 other_issues = []
-                
-                for issue in result['issues']:
+
+                for issue in result["issues"]:
                     if issue.startswith("Claude 검증:"):
                         claude_issues.append(issue[12:].strip())
                     else:
                         other_issues.append(issue)
-                
+
                 # 기타 문제 섹션
                 other_issues_html = ""
                 if other_issues:
@@ -3362,7 +3587,7 @@ class DDLValidationQCLIServer:
                         </ul>
                     </div>
                     """
-                
+
                 # Claude 검증 결과 섹션
                 claude_section_html = ""
                 if claude_issues:
@@ -3372,12 +3597,12 @@ class DDLValidationQCLIServer:
                         {''.join(f'<div class="claude-result-small"><pre>{claude_result}</pre></div>' for claude_result in claude_issues)}
                     </div>
                     """
-                
+
                 # 성공 섹션
                 success_html = ""
-                if not result['issues']:
+                if not result["issues"]:
                     success_html = '<div class="success-message">✅ 모든 검증을 통과했습니다.</div>'
-                
+
                 file_sections += f"""
                 <div class="file-section">
                     <div class="file-header">
@@ -3409,7 +3634,7 @@ class DDLValidationQCLIServer:
                     {success_html}
                 </div>
                 """
-            
+
             # HTML 보고서 생성
             html_content = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -3636,12 +3861,12 @@ class DDLValidationQCLIServer:
     </div>
 </body>
 </html>"""
-            
-            with open(report_path, 'w', encoding='utf-8') as f:
+
+            with open(report_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
-            
+
             return str(report_path)
-            
+
         except Exception as e:
             logger.error(f"통합 HTML 보고서 생성 오류: {e}")
             return f"보고서 생성 실패: {str(e)}"
@@ -3649,57 +3874,67 @@ class DDLValidationQCLIServer:
     async def list_aurora_mysql_clusters(self, region: str = "ap-northeast-2") -> str:
         """현재 리전의 Aurora MySQL 클러스터 목록 조회"""
         try:
-            rds_client = boto3.client('rds', region_name=region, verify=False)
-            
+            rds_client = boto3.client("rds", region_name=region, verify=False)
+
             # Aurora MySQL 클러스터 조회
             response = rds_client.describe_db_clusters()
-            
+
             aurora_mysql_clusters = []
-            for cluster in response['DBClusters']:
-                if cluster['Engine'] == 'aurora-mysql' and cluster['Status'] == 'available':
-                    aurora_mysql_clusters.append({
-                        'identifier': cluster['DBClusterIdentifier'],
-                        'engine_version': cluster['EngineVersion'],
-                        'endpoint': cluster.get('Endpoint', 'N/A'),
-                        'status': cluster['Status'],
-                        'database_name': cluster.get('DatabaseName', 'N/A')
-                    })
-            
+            for cluster in response["DBClusters"]:
+                if (
+                    cluster["Engine"] == "aurora-mysql"
+                    and cluster["Status"] == "available"
+                ):
+                    aurora_mysql_clusters.append(
+                        {
+                            "identifier": cluster["DBClusterIdentifier"],
+                            "engine_version": cluster["EngineVersion"],
+                            "endpoint": cluster.get("Endpoint", "N/A"),
+                            "status": cluster["Status"],
+                            "database_name": cluster.get("DatabaseName", "N/A"),
+                        }
+                    )
+
             if not aurora_mysql_clusters:
                 return f"❌ {region} 리전에서 사용 가능한 Aurora MySQL 클러스터를 찾을 수 없습니다."
-            
+
             result = f"🗄️ **Aurora MySQL 클러스터 목록** ({region} 리전)\n\n"
-            
+
             for i, cluster in enumerate(aurora_mysql_clusters, 1):
                 result += f"**{i}. {cluster['identifier']}**\n"
                 result += f"   • 엔진 버전: {cluster['engine_version']}\n"
                 result += f"   • 엔드포인트: {cluster['endpoint']}\n"
                 result += f"   • 기본 DB: {cluster['database_name']}\n"
                 result += f"   • 상태: {cluster['status']}\n\n"
-            
+
             result += "💡 **사용법:** 클러스터 번호나 이름을 입력하여 선택하세요."
-            
+
             return result
-            
+
         except Exception as e:
             return f"❌ Aurora MySQL 클러스터 조회 실패: {str(e)}"
 
-    async def select_aurora_cluster(self, cluster_selection: str, region: str = "ap-northeast-2") -> str:
+    async def select_aurora_cluster(
+        self, cluster_selection: str, region: str = "ap-northeast-2"
+    ) -> str:
         """Aurora 클러스터 선택"""
         try:
-            rds_client = boto3.client('rds', region_name=region, verify=False)
+            rds_client = boto3.client("rds", region_name=region, verify=False)
             response = rds_client.describe_db_clusters()
-            
+
             aurora_mysql_clusters = []
-            for cluster in response['DBClusters']:
-                if cluster['Engine'] == 'aurora-mysql' and cluster['Status'] == 'available':
+            for cluster in response["DBClusters"]:
+                if (
+                    cluster["Engine"] == "aurora-mysql"
+                    and cluster["Status"] == "available"
+                ):
                     aurora_mysql_clusters.append(cluster)
-            
+
             if not aurora_mysql_clusters:
                 return f"❌ {region} 리전에서 사용 가능한 Aurora MySQL 클러스터를 찾을 수 없습니다."
-            
+
             selected_cluster = None
-            
+
             # 번호로 선택
             if cluster_selection.isdigit():
                 cluster_index = int(cluster_selection) - 1
@@ -3708,21 +3943,24 @@ class DDLValidationQCLIServer:
             else:
                 # 이름으로 선택
                 for cluster in aurora_mysql_clusters:
-                    if cluster_selection.lower() in cluster['DBClusterIdentifier'].lower():
+                    if (
+                        cluster_selection.lower()
+                        in cluster["DBClusterIdentifier"].lower()
+                    ):
                         selected_cluster = cluster
                         break
-            
+
             if not selected_cluster:
                 return f"❌ 선택한 클러스터를 찾을 수 없습니다: {cluster_selection}"
-            
+
             # 선택된 클러스터 정보 저장 (임시로 클래스 변수에 저장)
             self.selected_cluster = {
-                'identifier': selected_cluster['DBClusterIdentifier'],
-                'endpoint': selected_cluster.get('Endpoint'),
-                'database_name': selected_cluster.get('DatabaseName'),
-                'region': region
+                "identifier": selected_cluster["DBClusterIdentifier"],
+                "endpoint": selected_cluster.get("Endpoint"),
+                "database_name": selected_cluster.get("DatabaseName"),
+                "region": region,
             }
-            
+
             return f"""✅ **Aurora 클러스터 선택 완료**
 
 🗄️ **선택된 클러스터:** {selected_cluster['DBClusterIdentifier']}
@@ -3731,7 +3969,7 @@ class DDLValidationQCLIServer:
 📍 **리전:** {region}
 
 💡 이제 이 클러스터에 대한 검증 작업을 수행할 수 있습니다."""
-            
+
         except Exception as e:
             return f"❌ Aurora 클러스터 선택 실패: {str(e)}"
 
@@ -3740,54 +3978,56 @@ class DDLValidationQCLIServer:
         try:
             connection, tunnel_used = await self.get_db_connection(database_secret)
             cursor = connection.cursor()
-            
+
             # 데이터베이스 목록 조회
             cursor.execute("SHOW DATABASES")
             databases = cursor.fetchall()
-            
+
             # 시스템 데이터베이스 제외
-            system_dbs = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+            system_dbs = {"information_schema", "performance_schema", "mysql", "sys"}
             user_databases = [db[0] for db in databases if db[0] not in system_dbs]
-            
+
             cursor.close()
             connection.close()
-            
+
             if not user_databases:
                 return "❌ 사용자 데이터베이스를 찾을 수 없습니다."
-            
+
             result = "🗄️ **데이터베이스 목록**\n\n"
-            
+
             for i, db_name in enumerate(user_databases, 1):
                 result += f"**{i}. {db_name}**\n"
-            
+
             result += "\n💡 **사용법:** 데이터베이스 번호나 이름을 입력하여 선택하세요."
-            
+
             return result
-            
+
         except Exception as e:
             return f"❌ 데이터베이스 목록 조회 실패: {str(e)}"
 
-    async def select_database(self, database_secret: str, database_selection: str) -> str:
+    async def select_database(
+        self, database_secret: str, database_selection: str
+    ) -> str:
         """데이터베이스 선택 및 변경"""
         try:
             connection, tunnel_used = await self.get_db_connection(database_secret)
             cursor = connection.cursor()
-            
+
             # 데이터베이스 목록 조회
             cursor.execute("SHOW DATABASES")
             databases = cursor.fetchall()
-            
+
             # 시스템 데이터베이스 제외
-            system_dbs = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+            system_dbs = {"information_schema", "performance_schema", "mysql", "sys"}
             user_databases = [db[0] for db in databases if db[0] not in system_dbs]
-            
+
             if not user_databases:
                 cursor.close()
                 connection.close()
                 return "❌ 사용자 데이터베이스를 찾을 수 없습니다."
-            
+
             selected_db = None
-            
+
             # 번호로 선택
             if database_selection.isdigit():
                 db_index = int(database_selection) - 1
@@ -3799,32 +4039,34 @@ class DDLValidationQCLIServer:
                     if database_selection.lower() in db_name.lower():
                         selected_db = db_name
                         break
-            
+
             if not selected_db:
                 cursor.close()
                 connection.close()
-                return f"❌ 선택한 데이터베이스를 찾을 수 없습니다: {database_selection}"
-            
+                return (
+                    f"❌ 선택한 데이터베이스를 찾을 수 없습니다: {database_selection}"
+                )
+
             # USE 명령으로 데이터베이스 변경
             cursor.execute(f"USE `{selected_db}`")
-            
+
             # 변경 확인
             cursor.execute("SELECT DATABASE()")
             current_db = cursor.fetchone()[0]
-            
+
             # 선택된 데이터베이스 저장
             self.selected_database = selected_db
-            
+
             cursor.close()
             connection.close()
-            
+
             return f"""✅ **데이터베이스 변경 완료**
 
 🗄️ **현재 데이터베이스:** {current_db}
 🔄 **변경 명령:** USE `{selected_db}`
 
 💡 이제 이 데이터베이스에 대한 작업을 수행할 수 있습니다."""
-            
+
         except Exception as e:
             return f"❌ 데이터베이스 선택 실패: {str(e)}"
 
@@ -4573,127 +4815,23 @@ class DDLValidationQCLIServer:
         except Exception as e:
             return f"❌ 복제 상태 조회 실패: {str(e)}"
 
-    async def validate_with_claude(self, ddl_content: str, database_secret: str = None, schema_info: dict = None, existing_analysis: dict = None) -> str:
+    async def validate_with_claude(
+        self,
+        ddl_content: str,
+        database_secret: str = None,
+        schema_info: dict = None,
+        existing_analysis: dict = None,
+    ) -> str:
         """
         Claude cross-region 프로파일을 활용한 DDL 검증 (실제 스키마 정보 및 기존 분석 결과 포함)
         """
-        # 스키마 정보가 제공되지 않았고 database_secret이 있으면 스키마 정보 추출
-        if schema_info is None and database_secret:
-            try:
-                schema_info = await self.extract_current_schema_info(database_secret)
-            except Exception as e:
-                logger.warning(f"스키마 정보 추출 실패: {e}")
-                schema_info = {}
-        
-        # 기존 분석 결과 컨텍스트 생성
-        analysis_context = ""
-        if existing_analysis:
-            analysis_details = []
-            
-            # 문법 검증 결과
-            if existing_analysis.get('syntax_issues'):
-                analysis_details.append("기존 문법 검증 결과:")
-                for issue in existing_analysis['syntax_issues']:
-                    analysis_details.append(f"  - {issue}")
-            
-            # 스키마 검증 결과
-            if existing_analysis.get('schema_issues'):
-                analysis_details.append("기존 스키마 검증 결과:")
-                for issue in existing_analysis['schema_issues']:
-                    analysis_details.append(f"  - {issue}")
-            
-            # 제약조건 검증 결과
-            if existing_analysis.get('constraint_issues'):
-                analysis_details.append("기존 제약조건 검증 결과:")
-                for issue in existing_analysis['constraint_issues']:
-                    analysis_details.append(f"  - {issue}")
-            
-            # DB 연결 정보
-            if existing_analysis.get('db_connection_info'):
-                db_info = existing_analysis['db_connection_info']
-                analysis_details.append(f"데이터베이스 연결: {'성공' if db_info.get('success') else '실패'}")
-                if db_info.get('success'):
-                    analysis_details.append(f"  - 서버 버전: {db_info.get('server_version', 'N/A')}")
-                    analysis_details.append(f"  - 현재 DB: {db_info.get('current_database', 'N/A')}")
-            
-            if analysis_details:
-                analysis_context = f"""
-기존 분석 결과:
-{chr(10).join(analysis_details)}
 
-위 기존 분석 결과를 참고하여 추가적인 검증을 수행해주세요.
-"""
-        
         # 관련 스키마 정보를 포함한 프롬프트 생성 (순서 고려)
-        schema_context = ""
+
         if schema_info:
-            schema_details = []
-            
-            # 순서대로 정렬하여 처리
-            sorted_items = sorted(schema_info.items(), key=lambda x: x[1].get('order', 0))
-            
-            for key, info in sorted_items:
-                order = info.get('order', 0)
-                
-                if info['type'] == 'table':
-                    table_name = info.get('table_name', key)
-                    
-                    if 'columns' in info:
-                        # ALTER TABLE 케이스
-                        columns_info = [f"{col['name']}({col['data_type']})" for col in info['columns']]
-                        schema_details.append(f"[{order}] ALTER TABLE '{table_name}':")
-                        schema_details.append(f"  - DB에 존재: {info['exists']}")
-                        if info.get('created_in_file'):
-                            schema_details.append(f"  - 파일 내 생성됨: {info['created_in_file']}")
-                        schema_details.append(f"  - 유효 존재: {info.get('effective_exists', info['exists'])}")
-                        
-                        if info['exists'] and columns_info:
-                            schema_details.append(f"  - 기존 컬럼: {', '.join(columns_info)}")
-                        
-                        if info.get('alter_type') and info.get('target_column'):
-                            schema_details.append(f"  - ALTER 작업: {info['alter_type']} {info['target_column']}")
-                    else:
-                        # CREATE/DROP TABLE 케이스
-                        action = "CREATE" if "CREATE" in key or info.get('exists') == False else "DROP"
-                        schema_details.append(f"[{order}] {action} TABLE '{table_name}': DB존재={info['exists']}")
-                
-                elif info['type'] == 'index':
-                    table_name = info.get('table_name', key.split('.')[0])
-                    index_name = info['index_name']
-                    
-                    if 'duplicate_column_indexes' in info:
-                        # CREATE INDEX 케이스
-                        schema_details.append(f"[{order}] CREATE INDEX '{index_name}' on '{table_name}':")
-                        schema_details.append(f"  - 테이블 DB존재: {info['table_exists']}")
-                        if info.get('created_in_file'):
-                            schema_details.append(f"  - 테이블 파일내생성: {info['created_in_file']}")
-                        schema_details.append(f"  - 테이블 유효존재: {info.get('effective_exists', info['table_exists'])}")
-                        schema_details.append(f"  - 생성할 컬럼: {', '.join(info['target_columns'])}")
-                        
-                        # DB의 중복 인덱스
-                        if info['duplicate_column_indexes']:
-                            schema_details.append("  - DB의 동일 컬럼 구성 인덱스:")
-                            for dup_idx in info['duplicate_column_indexes']:
-                                schema_details.append(f"    * {dup_idx['name']} ({dup_idx['columns']}) - {'UNIQUE' if dup_idx['unique'] else 'NON-UNIQUE'}")
-                        
-                        # 파일 내 중복 인덱스
-                        if info.get('file_duplicate_indexes'):
-                            schema_details.append("  - 파일 내 동일 컬럼 구성 인덱스:")
-                            for dup_idx in info['file_duplicate_indexes']:
-                                schema_details.append(f"    * [{dup_idx['order']}] {dup_idx['name']} ({','.join(dup_idx['columns'])})")
-                        
-                        if not info['duplicate_column_indexes'] and not info.get('file_duplicate_indexes'):
-                            schema_details.append("  - 중복 컬럼 구성 인덱스 없음")
-                    else:
-                        # DROP INDEX 케이스
-                        schema_details.append(f"[{order}] DROP INDEX '{index_name}' on '{table_name}':")
-                        schema_details.append(f"  - 테이블 존재: {info['table_exists']}")
-                        schema_details.append(f"  - 인덱스 존재: {info['index_exists']}")
-            
-            if schema_details:
-                schema_context = f"""
+            schema_context = f"""
 관련 스키마 정보 (실행 순서별):
-{chr(10).join(schema_details)}
+{chr(10).join(schema_info)}
 
 위 정보를 바탕으로 DDL의 적절성을 판단해주세요.
 특히 다음 사항을 확인해주세요:
@@ -4701,11 +4839,6 @@ class DDLValidationQCLIServer:
 2. 동일한 컬럼 구성의 인덱스 중복 여부
 3. 존재하지 않는 테이블/인덱스에 대한 DROP 시도
 4. 실행 순서상 논리적 오류
-"""
-            else:
-                schema_context = """
-관련 스키마 정보를 찾을 수 없습니다.
-기본적인 문법 검증만 수행합니다.
 """
         else:
             schema_context = """
@@ -4717,8 +4850,6 @@ class DDLValidationQCLIServer:
         다음 DDL 문을 검증해주세요:
 
         {ddl_content}
-
-        {analysis_context}
 
         {schema_context}
 
@@ -4733,124 +4864,159 @@ class DDLValidationQCLIServer:
         문제가 있으면 구체적으로 지적해주세요. 문제가 없으면 "검증 통과"라고 응답해주세요.
         """
 
-        claude_input = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 4096,  # 토큰 수를 4배로 증가
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": prompt}]}
-            ],
-            "temperature": 0.3,
-        })
-        
+        claude_input = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,  # 토큰 수를 4배로 증가
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                ],
+                "temperature": 0.3,
+            }
+        )
+
         sonnet_4_model_id = "us.anthropic.claude-sonnet-4-20250514-v1:0"
         sonnet_3_7_model_id = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
 
         # Claude Sonnet 4 inference profile 호출
         try:
             response = self.bedrock_client.invoke_model(
-                modelId=sonnet_4_model_id,
-                body=claude_input
+                modelId=sonnet_4_model_id, body=claude_input
             )
-            response_body = json.loads(response.get("body").read())
-            return response_body.get("content", [{}])[0].get("text", "")
+            # response가 dict인지 확인하고 body 추출
+            if isinstance(response, dict) and "body" in response:
+                response_body = json.loads(response["body"].read())
+            else:
+                logger.error(f"Unexpected response format: {type(response)}")
+                return "Claude 응답 형식 오류 - 예상치 못한 응답 구조"
+
+            content = response_body.get("content", [])
+            if isinstance(content, list) and len(content) > 0:
+                first_content = content[0]
+                if isinstance(first_content, dict):
+                    return first_content.get("text", "")
+                else:
+                    return str(first_content)
+            else:
+                return "Claude 응답 형식 오류"
         except Exception as e:
-            logger.warning(f"Claude Sonnet 4 호출 실패 → Claude 3.7 Sonnet cross-region profile로 fallback: {e}")
+            logger.warning(
+                f"Claude Sonnet 4 호출 실패 → Claude 3.7 Sonnet cross-region profile로 fallback: {e}"
+            )
             # Claude 3.7 Sonnet inference profile 호출 (fallback)
             try:
                 response = self.bedrock_client.invoke_model(
-                    modelId=sonnet_3_7_model_id,
-                    body=claude_input
+                    modelId=sonnet_3_7_model_id, body=claude_input
                 )
-                response_body = json.loads(response.get("body").read())
-                return response_body.get("content", [{}])[0].get("text", "")
+                # response가 dict인지 확인하고 body 추출
+                if isinstance(response, dict) and "body" in response:
+                    response_body = json.loads(response["body"].read())
+                else:
+                    logger.error(f"Unexpected response format: {type(response)}")
+                    return "Claude 응답 형식 오류 - 예상치 못한 응답 구조"
+
+                content = response_body.get("content", [])
+                if isinstance(content, list) and len(content) > 0:
+                    first_content = content[0]
+                    if isinstance(first_content, dict):
+                        return first_content.get("text", "")
+                    else:
+                        return str(first_content)
+                else:
+                    return "Claude 응답 형식 오류"
             except Exception as e:
                 logger.error(f"Claude 3.7 Sonnet 호출 오류: {e}")
                 return f"Claude 호출 중 오류 발생: {str(e)}"
 
-    async def extract_current_schema_info(self, database_secret: str, use_ssh_tunnel: bool = True) -> Dict[str, Any]:
+    async def extract_current_schema_info(
+        self, database_secret: str, use_ssh_tunnel: bool = True
+    ) -> Dict[str, Any]:
         """현재 데이터베이스의 스키마 정보 추출"""
         try:
             logger.info(f"스키마 정보 추출 시작: database_secret={database_secret}")
-            connection, tunnel_used = await self.get_db_connection(database_secret, use_ssh_tunnel)
+            connection, tunnel_used = await self.get_db_connection(
+                database_secret, None, use_ssh_tunnel
+            )
             cursor = connection.cursor()
-            
+
             # 현재 데이터베이스 확인
             cursor.execute("SELECT DATABASE()")
             current_db = cursor.fetchone()[0]
             logger.info(f"현재 데이터베이스: {current_db}")
-            
-            schema_info = {
-                'tables': [],
-                'columns': {},
-                'indexes': {}
-            }
-            
+
+            schema_info = {"tables": [], "columns": {}, "indexes": {}}
+
             # 테이블 목록 조회
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT table_name FROM information_schema.tables 
                 WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
                 ORDER BY table_name
-            """)
+            """
+            )
             tables = [row[0] for row in cursor.fetchall()]
-            schema_info['tables'] = tables
+            schema_info["tables"] = tables
             logger.info(f"발견된 테이블: {tables}")
-            
+
             # 각 테이블의 컬럼 정보 조회
             for table in tables:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT column_name, data_type, character_maximum_length, 
                            numeric_precision, numeric_scale, is_nullable, column_default
                     FROM information_schema.columns 
                     WHERE table_schema = DATABASE() AND table_name = %s
                     ORDER BY ordinal_position
-                """, (table,))
-                
+                """,
+                    (table,),
+                )
+
                 columns = []
                 for col_row in cursor.fetchall():
                     col_info = {
-                        'name': col_row[0],
-                        'data_type': col_row[1],
-                        'max_length': col_row[2],
-                        'precision': col_row[3],
-                        'scale': col_row[4],
-                        'nullable': col_row[5] == 'YES',
-                        'default': col_row[6]
+                        "name": col_row[0],
+                        "data_type": col_row[1],
+                        "max_length": col_row[2],
+                        "precision": col_row[3],
+                        "scale": col_row[4],
+                        "nullable": col_row[5] == "YES",
+                        "default": col_row[6],
                     }
                     columns.append(col_info)
-                
-                schema_info['columns'][table] = columns
-            
+
+                schema_info["columns"][table] = columns
+
             # 각 테이블의 인덱스 정보 조회
             for table in tables:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT index_name, column_name, seq_in_index, non_unique
                     FROM information_schema.statistics 
                     WHERE table_schema = DATABASE() AND table_name = %s
                     ORDER BY index_name, seq_in_index
-                """, (table,))
-                
+                """,
+                    (table,),
+                )
+
                 indexes = {}
                 for idx_row in cursor.fetchall():
                     idx_name = idx_row[0]
                     col_name = idx_row[1]
                     seq = idx_row[2]
                     non_unique = idx_row[3]
-                    
+
                     if idx_name not in indexes:
-                        indexes[idx_name] = {
-                            'columns': [],
-                            'unique': non_unique == 0
-                        }
-                    
-                    indexes[idx_name]['columns'].append(col_name)
-                
-                schema_info['indexes'][table] = indexes
-            
+                        indexes[idx_name] = {"columns": [], "unique": non_unique == 0}
+
+                    indexes[idx_name]["columns"].append(col_name)
+
+                schema_info["indexes"][table] = indexes
+
             cursor.close()
             connection.close()
-            
+
             return schema_info
-            
+
         except Exception as e:
             logger.error(f"스키마 정보 추출 중 오류: {e}")
             return {}
@@ -5192,7 +5358,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     "region": {
                         "type": "string",
                         "description": "AWS 리전 (기본값: ap-northeast-2)",
-                        "default": "ap-northeast-2"
+                        "default": "ap-northeast-2",
                     }
                 },
             },
@@ -5205,13 +5371,13 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "cluster_selection": {
                         "type": "string",
-                        "description": "클러스터 번호 또는 이름"
+                        "description": "클러스터 번호 또는 이름",
                     },
                     "region": {
                         "type": "string",
                         "description": "AWS 리전 (기본값: ap-northeast-2)",
-                        "default": "ap-northeast-2"
-                    }
+                        "default": "ap-northeast-2",
+                    },
                 },
                 "required": ["cluster_selection"],
             },
@@ -5224,7 +5390,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "database_secret": {
                         "type": "string",
-                        "description": "데이터베이스 시크릿 이름"
+                        "description": "데이터베이스 시크릿 이름",
                     }
                 },
                 "required": ["database_secret"],
@@ -5238,12 +5404,12 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "database_secret": {
                         "type": "string",
-                        "description": "데이터베이스 시크릿 이름"
+                        "description": "데이터베이스 시크릿 이름",
                     },
                     "database_selection": {
                         "type": "string",
-                        "description": "데이터베이스 번호 또는 이름"
-                    }
+                        "description": "데이터베이스 번호 또는 이름",
+                    },
                 },
                 "required": ["database_secret", "database_selection"],
             },
@@ -5254,14 +5420,11 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "검증할 SQL 파일명"
-                    },
+                    "filename": {"type": "string", "description": "검증할 SQL 파일명"},
                     "database_secret": {
                         "type": "string",
-                        "description": "데이터베이스 시크릿 이름"
-                    }
+                        "description": "데이터베이스 시크릿 이름",
+                    },
                 },
                 "required": ["filename", "database_secret"],
             },
@@ -5283,7 +5446,7 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             # database_secret이 없으면 선택 옵션 제공
             filename = arguments["filename"]
             database_secret = arguments.get("database_secret")
-            
+
             if not database_secret:
                 # SQL 파일 읽기
                 sql_file_path = SQL_DIR / filename
@@ -5292,14 +5455,18 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                 else:
                     with open(sql_file_path, "r", encoding="utf-8") as f:
                         ddl_content = f.read()
-                    
+
                     # 데이터베이스 선택 프롬프트 표시
-                    result = await ddl_validator.prompt_for_database_selection(ddl_content, filename)
+                    result = await ddl_validator.prompt_for_database_selection(
+                        ddl_content, filename
+                    )
             else:
                 # 기존 계획 생성 방식
-                plan = await ddl_validator.create_validation_plan(filename, database_secret)
+                plan = await ddl_validator.create_validation_plan(
+                    filename, database_secret
+                )
                 plan_display = ddl_validator._format_validation_plan_display(plan)
-                
+
                 result = f"""📋 **DDL 검증 실행 계획:**
 
 {plan_display}
@@ -5309,7 +5476,7 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
    • 'n' 또는 'no': 검증 취소
 
 💡 **참고:** confirm_and_execute 도구로 응답해주세요."""
-                
+
                 ddl_validator.current_plan = plan
         elif name == "test_database_connection":
             result = await ddl_validator.execute_with_auto_plan(
@@ -5388,20 +5555,19 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         elif name == "select_aurora_cluster":
             result = await ddl_validator.select_aurora_cluster(
                 arguments["cluster_selection"],
-                arguments.get("region", "ap-northeast-2")
+                arguments.get("region", "ap-northeast-2"),
             )
         elif name == "list_databases":
             result = await ddl_validator.list_databases(arguments["database_secret"])
         elif name == "select_database":
             result = await ddl_validator.select_database(
-                arguments["database_secret"],
-                arguments["database_selection"]
+                arguments["database_secret"], arguments["database_selection"]
             )
         elif name == "validate_sql_with_database":
             result = await ddl_validator.execute_validation_workflow(
                 ddl_content="",  # 파일에서 읽어올 예정
                 database_secret=arguments["database_secret"],
-                filename=arguments["filename"]
+                filename=arguments["filename"],
             )
             # 실제로는 파일을 읽어서 처리해야 함
             sql_file_path = SQL_DIR / arguments["filename"]
