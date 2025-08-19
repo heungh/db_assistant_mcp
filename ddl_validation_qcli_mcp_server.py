@@ -347,9 +347,9 @@ class DDLValidationQCLIServer:
             validation_state = await self.step_1_syntax_check(validation_state)
             logger.info(f"Step 1 completed, state is None: {validation_state is None}")
 
-            # 문법 오류가 있으면 중단
+            # 문법 오류가 있으면 중단 (HTML 생성 없이)
             if not validation_state.get("syntax_valid", False):
-                return await self.generate_final_report(validation_state)
+                return await self.generate_final_report(validation_state, generate_html=False)
 
             # 2단계: 표준 규칙 검증
             validation_state = await self.step_2_standard_check(validation_state)
@@ -388,8 +388,8 @@ class DDLValidationQCLIServer:
             else:
                 logger.error("validation_state is None before step 6")
 
-            # 7단계: 최종 보고서 생성
-            result = await self.generate_final_report(validation_state)
+            # 7단계: 최종 보고서 생성 (HTML 포함)
+            result = await self.generate_final_report(validation_state, generate_html=True)
 
             # 로컬 검증인 경우 안내 메시지 추가
             if not database_secret:
@@ -493,8 +493,8 @@ class DDLValidationQCLIServer:
             # 3단계: Claude AI 검증 (DB 정보 없이)
             validation_state = await self.step_6_claude_validation(validation_state)
 
-            # 4단계: 최종 보고서 생성
-            result = await self.generate_final_report(validation_state)
+            # 4단계: 최종 보고서 생성 (HTML 포함)
+            result = await self.generate_final_report(validation_state, generate_html=True)
 
             # 로컬 검증임을 명시
             local_notice = "\n\n🔍 **로컬 검증 완료**\n• 데이터베이스 연결 없이 문법 및 표준 규칙만 검증되었습니다.\n• 완전한 스키마 검증을 원하시면 데이터베이스 시크릿을 지정해주세요."
@@ -1039,7 +1039,7 @@ class DDLValidationQCLIServer:
         state["current_step"] = 7
         return state
 
-    async def generate_final_report(self, state: dict) -> str:
+    async def generate_final_report(self, state: dict, generate_html: bool = True) -> str:
         """최종 보고서 생성"""
         filename = state["filename"]
         ddl_content = state["ddl_content"]
@@ -1076,31 +1076,38 @@ class DDLValidationQCLIServer:
             summary = f"❌ 발견된 문제: {len(all_issues)}개"
             status = "FAIL"
 
-        # HTML 보고서 생성
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = OUTPUT_DIR / f"validation_report_{filename}_{timestamp}.html"
+        # HTML 보고서 생성 (generate_html이 True인 경우만)
+        if generate_html:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = OUTPUT_DIR / f"validation_report_{filename}_{timestamp}.html"
 
-        # 새로운 generate_html_report 함수 사용
-        await self.generate_html_report(
-            report_path=report_path,
-            filename=filename,
-            ddl_content=ddl_content,
-            ddl_type=ddl_type,
-            status=status,
-            summary=summary,
-            issues=all_issues,
-            db_connection_info=state.get("db_connection_info"),
-            schema_validation=state.get("schema_validation"),
-            constraint_validation=state.get("constraint_validation"),
-            database_secret=state.get("database_secret"),
-        )
+            # 새로운 generate_html_report 함수 사용
+            await self.generate_html_report(
+                report_path=report_path,
+                filename=filename,
+                ddl_content=ddl_content,
+                ddl_type=ddl_type,
+                status=status,
+                summary=summary,
+                issues=all_issues,
+                db_connection_info=state.get("db_connection_info"),
+                schema_validation=state.get("schema_validation"),
+                constraint_validation=state.get("constraint_validation"),
+                database_secret=state.get("database_secret"),
+            )
 
         # 결과 메시지 생성
         result_message = f"""
 {summary}
+"""
 
+        # HTML 보고서가 생성된 경우에만 경로 표시
+        if generate_html:
+            result_message += f"""
 📄 상세 보고서가 저장되었습니다: {report_path}
+"""
 
+        result_message += """
 📊 검증 결과:
 """
 
