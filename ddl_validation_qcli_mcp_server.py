@@ -28,15 +28,27 @@ from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 import logging
 
-# 로깅 설정
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # 현재 디렉토리 기준 경로 설정
 CURRENT_DIR = Path(__file__).parent
 OUTPUT_DIR = CURRENT_DIR / "output"
 SQL_DIR = CURRENT_DIR / "sql"
 DATA_DIR = CURRENT_DIR / "data"
+LOG_DIR = CURRENT_DIR / "logs"
+
+# 로그 디렉토리 생성
+LOG_DIR.mkdir(exist_ok=True)
+
+# 로깅 설정 - 파일과 콘솔 모두에 출력
+log_file = LOG_DIR / "ddl_validation.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # 디렉토리 생성
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -4829,9 +4841,21 @@ class DDLValidationQCLIServer:
         # 관련 스키마 정보를 포함한 프롬프트 생성 (순서 고려)
 
         if schema_info:
+            # 스키마 정보를 문자열로 변환
+            schema_text = []
+            if isinstance(schema_info, dict):
+                for key, value in schema_info.items():
+                    schema_text.append(f"{key}: {value}")
+            else:
+                schema_text.append(str(schema_info))
+            
+            # 기존 분석 결과 추가
+            if existing_analysis:
+                schema_text.append(f"기존 분석 결과: {existing_analysis}")
+            
             schema_context = f"""
 관련 스키마 정보 (실행 순서별):
-{chr(10).join(schema_info)}
+{chr(10).join(schema_text)}
 
 위 정보를 바탕으로 DDL의 적절성을 판단해주세요.
 특히 다음 사항을 확인해주세요:
