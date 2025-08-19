@@ -1316,7 +1316,7 @@ class DDLValidationQCLIServer:
     async def validate_schema(
         self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = True
     ) -> Dict[str, Any]:
-        """DDL 구문 유형에 따른 스키마 검증 (파일 내 순서 고려)"""
+        """DDL 구문 유형에 따른 스키마 검증"""
         try:
             # DDL 구문 유형 및 상세 정보 파싱
             ddl_info = self.parse_ddl_detailed(ddl_content)
@@ -1326,12 +1326,6 @@ class DDLValidationQCLIServer:
                     "error": "DDL에서 구문 정보를 추출할 수 없습니다.",
                 }
 
-            # 파일 내에서 생성되는 테이블들을 미리 추출
-            created_tables_in_file = set()
-            for ddl_statement in ddl_info:
-                if ddl_statement["type"] == "CREATE_TABLE":
-                    created_tables_in_file.add(ddl_statement["table"].lower())
-
             connection, tunnel_used = await self.get_db_connection(
                 database_secret, None, use_ssh_tunnel
             )
@@ -1339,7 +1333,7 @@ class DDLValidationQCLIServer:
 
             validation_results = []
 
-            # DDL 구문 유형별 검증 (순서대로 처리)
+            # DDL 구문 유형별 검증
             for ddl_statement in ddl_info:
                 ddl_type = ddl_statement["type"]
                 table_name = ddl_statement["table"]
@@ -1347,11 +1341,9 @@ class DDLValidationQCLIServer:
                 if ddl_type == "CREATE_TABLE":
                     result = await self.validate_create_table(cursor, ddl_statement)
                 elif ddl_type == "ALTER_TABLE":
-                    # ALTER TABLE 검증 시 파일 내에서 생성된 테이블인지 확인
-                    result = await self.validate_alter_table(cursor, ddl_statement, created_tables_in_file)
+                    result = await self.validate_alter_table(cursor, ddl_statement)
                 elif ddl_type == "CREATE_INDEX":
-                    # CREATE INDEX 검증 시 파일 내에서 생성된 테이블인지 확인
-                    result = await self.validate_create_index(cursor, ddl_statement, created_tables_in_file)
+                    result = await self.validate_create_index(cursor, ddl_statement)
                 elif ddl_type == "DROP_TABLE":
                     result = await self.validate_drop_table(cursor, ddl_statement)
                 elif ddl_type == "DROP_INDEX":
@@ -1675,9 +1667,9 @@ class DDLValidationQCLIServer:
         }
 
     async def validate_alter_table(
-        self, cursor, ddl_statement: Dict[str, Any], created_tables_in_file: set = None
+        self, cursor, ddl_statement: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """ALTER TABLE 구문 검증 (파일 내 생성 테이블 고려)"""
+        """ALTER TABLE 구문 검증"""
         table_name = ddl_statement["table"]
         alter_type = ddl_statement["alter_type"]
 
@@ -1693,10 +1685,7 @@ class DDLValidationQCLIServer:
         table_exists = cursor.fetchone()[0] > 0
         issues = []
 
-        # 파일 내에서 생성된 테이블인지 확인
-        created_in_file = created_tables_in_file and table_name.lower() in created_tables_in_file
-
-        if not table_exists and not created_in_file:
+        if not table_exists:
             issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
             return {
                 "table": table_name,
@@ -1704,17 +1693,6 @@ class DDLValidationQCLIServer:
                 "alter_type": alter_type,
                 "valid": False,
                 "issues": issues,
-            }
-
-        # 파일 내에서 생성된 테이블의 경우 스키마 검증을 건너뛰고 성공으로 처리
-        if created_in_file and not table_exists:
-            return {
-                "table": table_name,
-                "ddl_type": "ALTER_TABLE",
-                "alter_type": alter_type,
-                "valid": True,
-                "issues": [],
-                "note": f"테이블 '{table_name}'은 같은 파일 내에서 생성되었습니다."
             }
 
         # 현재 테이블의 컬럼 정보 조회
@@ -1790,9 +1768,9 @@ class DDLValidationQCLIServer:
         }
 
     async def validate_create_index(
-        self, cursor, ddl_statement: Dict[str, Any], created_tables_in_file: set = None
+        self, cursor, ddl_statement: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """CREATE INDEX 구문 검증 (파일 내 생성 테이블 고려)"""
+        """CREATE INDEX 구문 검증"""
         table_name = ddl_statement["table"]
         index_name = ddl_statement["index_name"]
         columns = ddl_statement["columns"]
@@ -1809,22 +1787,9 @@ class DDLValidationQCLIServer:
         )
 
         table_exists = cursor.fetchone()[0] > 0
-        
-        # 파일 내에서 생성된 테이블인지 확인
-        created_in_file = created_tables_in_file and table_name.lower() in created_tables_in_file
 
-        if not table_exists and not created_in_file:
+        if not table_exists:
             issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
-        elif created_in_file and not table_exists:
-            # 파일 내에서 생성된 테이블의 경우 인덱스 생성을 성공으로 처리
-            return {
-                "table": table_name,
-                "ddl_type": "CREATE_INDEX",
-                "index_name": index_name,
-                "valid": True,
-                "issues": [],
-                "note": f"테이블 '{table_name}'은 같은 파일 내에서 생성되었습니다."
-            }
         else:
             # 인덱스 존재 여부 확인
             cursor.execute(

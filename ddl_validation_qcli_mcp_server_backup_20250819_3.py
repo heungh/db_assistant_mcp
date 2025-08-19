@@ -1316,7 +1316,7 @@ class DDLValidationQCLIServer:
     async def validate_schema(
         self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = True
     ) -> Dict[str, Any]:
-        """DDL 구문 유형에 따른 스키마 검증 (파일 내 순서 고려)"""
+        """DDL 구문 유형에 따른 스키마 검증"""
         try:
             # DDL 구문 유형 및 상세 정보 파싱
             ddl_info = self.parse_ddl_detailed(ddl_content)
@@ -1326,12 +1326,6 @@ class DDLValidationQCLIServer:
                     "error": "DDL에서 구문 정보를 추출할 수 없습니다.",
                 }
 
-            # 파일 내에서 생성되는 테이블들을 미리 추출
-            created_tables_in_file = set()
-            for ddl_statement in ddl_info:
-                if ddl_statement["type"] == "CREATE_TABLE":
-                    created_tables_in_file.add(ddl_statement["table"].lower())
-
             connection, tunnel_used = await self.get_db_connection(
                 database_secret, None, use_ssh_tunnel
             )
@@ -1339,7 +1333,7 @@ class DDLValidationQCLIServer:
 
             validation_results = []
 
-            # DDL 구문 유형별 검증 (순서대로 처리)
+            # DDL 구문 유형별 검증
             for ddl_statement in ddl_info:
                 ddl_type = ddl_statement["type"]
                 table_name = ddl_statement["table"]
@@ -1347,11 +1341,9 @@ class DDLValidationQCLIServer:
                 if ddl_type == "CREATE_TABLE":
                     result = await self.validate_create_table(cursor, ddl_statement)
                 elif ddl_type == "ALTER_TABLE":
-                    # ALTER TABLE 검증 시 파일 내에서 생성된 테이블인지 확인
-                    result = await self.validate_alter_table(cursor, ddl_statement, created_tables_in_file)
+                    result = await self.validate_alter_table(cursor, ddl_statement)
                 elif ddl_type == "CREATE_INDEX":
-                    # CREATE INDEX 검증 시 파일 내에서 생성된 테이블인지 확인
-                    result = await self.validate_create_index(cursor, ddl_statement, created_tables_in_file)
+                    result = await self.validate_create_index(cursor, ddl_statement)
                 elif ddl_type == "DROP_TABLE":
                     result = await self.validate_drop_table(cursor, ddl_statement)
                 elif ddl_type == "DROP_INDEX":
@@ -1675,9 +1667,9 @@ class DDLValidationQCLIServer:
         }
 
     async def validate_alter_table(
-        self, cursor, ddl_statement: Dict[str, Any], created_tables_in_file: set = None
+        self, cursor, ddl_statement: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """ALTER TABLE 구문 검증 (파일 내 생성 테이블 고려)"""
+        """ALTER TABLE 구문 검증"""
         table_name = ddl_statement["table"]
         alter_type = ddl_statement["alter_type"]
 
@@ -1693,10 +1685,7 @@ class DDLValidationQCLIServer:
         table_exists = cursor.fetchone()[0] > 0
         issues = []
 
-        # 파일 내에서 생성된 테이블인지 확인
-        created_in_file = created_tables_in_file and table_name.lower() in created_tables_in_file
-
-        if not table_exists and not created_in_file:
+        if not table_exists:
             issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
             return {
                 "table": table_name,
@@ -1704,17 +1693,6 @@ class DDLValidationQCLIServer:
                 "alter_type": alter_type,
                 "valid": False,
                 "issues": issues,
-            }
-
-        # 파일 내에서 생성된 테이블의 경우 스키마 검증을 건너뛰고 성공으로 처리
-        if created_in_file and not table_exists:
-            return {
-                "table": table_name,
-                "ddl_type": "ALTER_TABLE",
-                "alter_type": alter_type,
-                "valid": True,
-                "issues": [],
-                "note": f"테이블 '{table_name}'은 같은 파일 내에서 생성되었습니다."
             }
 
         # 현재 테이블의 컬럼 정보 조회
@@ -1790,9 +1768,9 @@ class DDLValidationQCLIServer:
         }
 
     async def validate_create_index(
-        self, cursor, ddl_statement: Dict[str, Any], created_tables_in_file: set = None
+        self, cursor, ddl_statement: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """CREATE INDEX 구문 검증 (파일 내 생성 테이블 고려)"""
+        """CREATE INDEX 구문 검증"""
         table_name = ddl_statement["table"]
         index_name = ddl_statement["index_name"]
         columns = ddl_statement["columns"]
@@ -1809,22 +1787,9 @@ class DDLValidationQCLIServer:
         )
 
         table_exists = cursor.fetchone()[0] > 0
-        
-        # 파일 내에서 생성된 테이블인지 확인
-        created_in_file = created_tables_in_file and table_name.lower() in created_tables_in_file
 
-        if not table_exists and not created_in_file:
+        if not table_exists:
             issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
-        elif created_in_file and not table_exists:
-            # 파일 내에서 생성된 테이블의 경우 인덱스 생성을 성공으로 처리
-            return {
-                "table": table_name,
-                "ddl_type": "CREATE_INDEX",
-                "index_name": index_name,
-                "valid": True,
-                "issues": [],
-                "note": f"테이블 '{table_name}'은 같은 파일 내에서 생성되었습니다."
-            }
         else:
             # 인덱스 존재 여부 확인
             cursor.execute(
@@ -3130,11 +3095,6 @@ class DDLValidationQCLIServer:
         try:
             # 1. 실행 계획 생성
             plan = await self.create_execution_plan(operation, **kwargs)
-            
-            # 에러 체크
-            if "error" in plan:
-                return f"❌ 실행 계획 생성 실패: {plan['error']}"
-            
             plan_display = self._format_plan_display(plan)
 
             # 2. 실행 계획 표시 및 확인 요청
@@ -3185,9 +3145,6 @@ class DDLValidationQCLIServer:
     async def create_execution_plan(self, operation: str, **kwargs) -> Dict[str, Any]:
         """작업 실행 계획 생성"""
         try:
-            logger.info(f"Creating execution plan for operation: {operation}")
-            logger.info(f"Kwargs: {kwargs}")
-            
             if operation == "validate_sql_file":
                 filename = kwargs.get("filename", "")
                 database_secret = kwargs.get("database_secret", "")
@@ -3278,46 +3235,9 @@ class DDLValidationQCLIServer:
 
                 return plan
 
-            elif operation == "validate_all_sql":
-                database_secret = kwargs.get("database_secret", "")
-
-                plan = {
-                    "operation": operation,
-                    "database_secret": database_secret,
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "tool_name": "validate_all_sql",
-                    "steps": [
-                        {
-                            "step": 1,
-                            "action": "SQL 파일 목록 조회",
-                            "target": "sql 디렉토리",
-                            "tool": "list_sql_files",
-                        },
-                        {
-                            "step": 2,
-                            "action": "각 파일 순차 검증",
-                            "target": "최대 5개 파일",
-                            "tool": "validate_sql_file",
-                        },
-                        {
-                            "step": 3,
-                            "action": "통합 보고서 생성",
-                            "target": "HTML 보고서",
-                            "tool": "generate_consolidated_html_report_with_links",
-                        },
-                    ],
-                    "status": "created",
-                    "parameters": kwargs,
-                }
-
-                logger.info(f"Created plan: {plan}")
-                return plan
-
-            logger.warning(f"Unsupported operation: {operation}")
             return {"error": f"지원하지 않는 작업입니다: {operation}"}
 
         except Exception as e:
-            logger.error(f"Error creating execution plan: {str(e)}")
             return {"error": f"실행 계획 생성 실패: {str(e)}"}
 
     def _format_plan_display(self, plan: Dict[str, Any]) -> str:
@@ -3552,7 +3472,6 @@ class DDLValidationQCLIServer:
 
             validation_results = []
             summary_results = []
-            detailed_reports = []
 
             for sql_file in files_to_process:
                 try:
@@ -3565,29 +3484,17 @@ class DDLValidationQCLIServer:
                         ddl_content, database_secret, sql_file.name
                     )
 
-                    # 결과에서 상태 파악 및 상세 정보 추출
-                    syntax_valid = "문법 검증: ✅ 통과" in result
-                    db_connected = "데이터베이스 연결: ✅ 성공" in result
-                    schema_valid = "스키마 검증: ✅ 통과" in result
-                    constraint_valid = "제약조건 검증: ✅ 통과" in result
-                    ai_valid = "Claude AI 검증: ✅ 통과" in result
-
-                    # 문제 개수 추출
-                    issue_match = re.search(r"발견된 문제: (\d+)개", result)
-                    issue_count = int(issue_match.group(1)) if issue_match else 0
-                    
-                    # 문법 오류 체크
-                    syntax_error_match = re.search(r"문법 오류로 인한 검증 실패: (\d+)개", result)
-                    if syntax_error_match:
-                        issue_count = int(syntax_error_match.group(1))
-                        syntax_valid = False
-                        db_connected = False
-
-                    if issue_count == 0 and "✅ 모든 검증을 통과했습니다" in result:
+                    # 결과에서 상태 파악 (간단한 방식)
+                    if "✅ 모든 검증을 통과했습니다" in result:
                         status = "PASS"
                         issues = []
                     else:
                         status = "FAIL"
+                        # 결과에서 문제 개수 추출
+                        import re
+
+                        issue_match = re.search(r"(\d+)개 문제", result)
+                        issue_count = int(issue_match.group(1)) if issue_match else 1
                         issues = [f"검증 실패 ({issue_count}개 문제 발견)"]
 
                     validation_results.append(
@@ -3599,29 +3506,16 @@ class DDLValidationQCLIServer:
                             "issues": issues,
                             "warnings": [],
                             "db_connection_info": None,
-                            "syntax_valid": syntax_valid,
-                            "db_connected": db_connected,
-                            "schema_valid": schema_valid,
-                            "constraint_valid": constraint_valid,
-                            "ai_valid": ai_valid,
-                            "issue_count": issue_count,
+                            "syntax_valid": status == "PASS",
                             "full_result": result,
                         }
                     )
-
-                    # 상세 보고서 파일명 추출 (기존 개별 검증에서 생성된 파일)
-                    report_match = re.search(r"상세 보고서가 저장되었습니다: (.+\.html)", result)
-                    if report_match:
-                        detailed_reports.append({
-                            "filename": sql_file.name,
-                            "report_path": report_match.group(1)
-                        })
 
                     # 요약 결과
                     if status == "PASS":
                         summary_results.append(f"✅ **{sql_file.name}**: 통과")
                     else:
-                        summary_results.append(f"❌ **{sql_file.name}**: 실패 ({issue_count}개 문제)")
+                        summary_results.append(f"❌ **{sql_file.name}**: 실패")
 
                 except Exception as e:
                     validation_results.append(
@@ -3634,19 +3528,14 @@ class DDLValidationQCLIServer:
                             "warnings": [],
                             "db_connection_info": None,
                             "syntax_valid": False,
-                            "db_connected": False,
-                            "schema_valid": False,
-                            "constraint_valid": False,
-                            "ai_valid": False,
-                            "issue_count": 1,
                             "full_result": f"오류: {str(e)}",
                         }
                     )
                     summary_results.append(f"❌ **{sql_file.name}**: 오류 - {str(e)}")
 
-            # 통합 HTML 보고서 생성 (클릭 가능한 링크 포함)
-            consolidated_report_path = await self.generate_consolidated_html_report_with_links(
-                validation_results, detailed_reports, database_secret
+            # 통합 HTML 보고서 생성
+            consolidated_report_path = await self.generate_consolidated_html_report(
+                validation_results, database_secret
             )
 
             # 요약 통계
@@ -3675,499 +3564,6 @@ class DDLValidationQCLIServer:
 
         except Exception as e:
             return f"전체 SQL 파일 검증 실패: {str(e)}"
-
-    async def generate_consolidated_html_report_with_links(
-        self, validation_results: List[Dict], detailed_reports: List[Dict], database_secret: str
-    ) -> str:
-        """클릭 가능한 링크가 포함된 통합 HTML 보고서 생성"""
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_filename = f"consolidated_validation_report_{timestamp}.html"
-            report_path = OUTPUT_DIR / report_filename
-
-            # 전체 통계 계산
-            total_files = len(validation_results)
-            passed_files = sum(1 for r in validation_results if r["status"] == "PASS")
-            failed_files = total_files - passed_files
-            syntax_pass = sum(1 for r in validation_results if r.get("syntax_valid", False))
-            db_pass = sum(1 for r in validation_results if r.get("db_connected", False))
-            schema_pass = sum(1 for r in validation_results if r.get("schema_valid", False))
-            constraint_pass = sum(1 for r in validation_results if r.get("constraint_valid", False))
-            ai_pass = sum(1 for r in validation_results if r.get("ai_valid", False))
-
-            # 상세보고서 링크 매핑
-            report_links = {report["filename"]: report["report_path"] for report in detailed_reports}
-
-            # 테이블 행 생성
-            table_rows = ""
-            for i, result in enumerate(validation_results, 1):
-                status_class = "success" if result["status"] == "PASS" else "error"
-                
-                # 각 검증 항목 상태
-                syntax_status = "✅ 통과" if result.get("syntax_valid", False) else "❌ 실패"
-                db_status = "✅ 성공" if result.get("db_connected", False) else "❌ 실패"
-                schema_status = "✅ 통과" if result.get("schema_valid", False) else "❌ 실패"
-                constraint_status = "✅ 통과" if result.get("constraint_valid", False) else "❌ 실패"
-                ai_status = "✅ 통과" if result.get("ai_valid", False) else "❌ 실패"
-                
-                # 상세보고서 링크
-                filename_cell = result["filename"]
-                if result["filename"] in report_links:
-                    detail_report_name = os.path.basename(report_links[result["filename"]])
-                    filename_cell = f'<a href="{detail_report_name}" target="_blank" class="detail-link">{result["filename"]}</a>'
-
-                table_rows += f"""
-                <tr class="{status_class}" onclick="window.open('{detail_report_name if result["filename"] in report_links else "#"}', '_blank')" style="cursor: pointer;">
-                    <td>{filename_cell}</td>
-                    <td class="status-cell">{syntax_status}</td>
-                    <td class="status-cell">{db_status}</td>
-                    <td class="status-cell">{schema_status}</td>
-                    <td class="status-cell">{constraint_status}</td>
-                    <td class="status-cell">{ai_status}</td>
-                    <td class="issue-count">{result.get('issue_count', 0)}개</td>
-                </tr>
-                """
-
-            # HTML 보고서 생성
-            html_content = f"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{database_secret or 'SQL'} 검증 통합 보고서</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        h1 {{ color: #2c3e50; text-align: center; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #34495e; border-left: 4px solid #3498db; padding-left: 15px; }}
-        .summary {{ background: #ecf0f1; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-        .stats {{ display: flex; justify-content: space-around; margin: 20px 0; flex-wrap: wrap; }}
-        .stat-box {{ text-align: center; padding: 15px; background: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 5px; min-width: 120px; }}
-        .stat-number {{ font-size: 2em; font-weight: bold; color: #3498db; }}
-        .stat-label {{ color: #7f8c8d; margin-top: 5px; font-size: 0.9em; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
-        th {{ background-color: #3498db; color: white; font-weight: bold; }}
-        tr:nth-child(even) {{ background-color: #f9f9f9; }}
-        tr.success {{ background-color: #d5f4e6 !important; }}
-        tr.error {{ background-color: #fadbd8 !important; }}
-        tr:hover {{ background-color: #e8f4f8 !important; }}
-        .status-cell {{ text-align: center; font-weight: bold; }}
-        .issue-count {{ text-align: center; font-weight: bold; color: #e74c3c; }}
-        .detail-link {{ color: #3498db; text-decoration: none; font-weight: bold; }}
-        .detail-link:hover {{ text-decoration: underline; }}
-        .timestamp {{ color: #7f8c8d; font-size: 0.9em; text-align: center; margin-top: 30px; }}
-        .click-hint {{ background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; border-radius: 5px; margin: 10px 0; text-align: center; color: #856404; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🗄️ {database_secret or 'SQL'} 검증 통합 보고서</h1>
-        
-        <div class="summary">
-            <h2>📊 검증 요약</h2>
-            <div class="stats">
-                <div class="stat-box">
-                    <div class="stat-number">{total_files}</div>
-                    <div class="stat-label">총 검증 파일</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">{passed_files}</div>
-                    <div class="stat-label">완전 통과</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">{failed_files}</div>
-                    <div class="stat-label">실패</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">{syntax_pass}</div>
-                    <div class="stat-label">문법 통과</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">{db_pass}</div>
-                    <div class="stat-label">DB 연결 성공</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">{schema_pass}</div>
-                    <div class="stat-label">스키마 통과</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="click-hint">
-            💡 <strong>사용법:</strong> 아래 테이블의 각 행을 클릭하면 해당 파일의 상세 검증 보고서를 볼 수 있습니다.
-        </div>
-
-        <h2>📋 상세 검증 결과</h2>
-        
-        <table>
-            <thead>
-                <tr>
-                    <th>파일명</th>
-                    <th>문법 검증</th>
-                    <th>DB 연결</th>
-                    <th>스키마 검증</th>
-                    <th>제약조건 검증</th>
-                    <th>AI 검증</th>
-                    <th>총 문제 수</th>
-                </tr>
-            </thead>
-            <tbody>
-                {table_rows}
-            </tbody>
-        </table>
-
-        <h2>📈 검증 통계</h2>
-        
-        <div class="summary">
-            <ul>
-                <li><strong>총 검증 파일:</strong> {total_files}개</li>
-                <li><strong>문법 검증 통과:</strong> {syntax_pass}개 ({syntax_pass/total_files*100:.1f}%)</li>
-                <li><strong>데이터베이스 연결 성공:</strong> {db_pass}개 ({db_pass/total_files*100:.1f}%)</li>
-                <li><strong>스키마 검증 통과:</strong> {schema_pass}개 ({schema_pass/total_files*100:.1f}%)</li>
-                <li><strong>제약조건 검증 통과:</strong> {constraint_pass}개 ({constraint_pass/total_files*100:.1f}%)</li>
-                <li><strong>AI 검증 통과:</strong> {ai_pass}개 ({ai_pass/total_files*100:.1f}%)</li>
-                <li><strong>완전 통과 파일:</strong> {passed_files}개 ({passed_files/total_files*100:.1f}%)</li>
-            </ul>
-        </div>
-
-        <h2>🎯 권장사항</h2>
-        
-        <div class="summary">
-            <ul>
-                <li><strong>문법 오류 우선 수정:</strong> 문법 검증에 실패한 파일들을 먼저 해결하세요.</li>
-                <li><strong>스키마 검증 문제 해결:</strong> 존재하지 않는 테이블/컬럼 참조 문제를 수정하세요.</li>
-                <li><strong>베스트 프랙티스 적용:</strong> AI 검증에서 제안하는 성능 최적화 및 보안 권고사항을 검토하세요.</li>
-                <li><strong>정기적인 검증:</strong> SQL 파일 변경 시 자동화된 검증 프로세스 도입을 검토하세요.</li>
-            </ul>
-        </div>
-
-        <div class="timestamp">
-            <p>📅 보고서 생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)</p>
-            <p>🗄️ 대상 데이터베이스: {database_secret or 'N/A'}</p>
-            <p>🔧 검증 도구: DB Assistant MCP Server v2.0</p>
-        </div>
-    </div>
-</body>
-</html>"""
-
-            # 파일 저장
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-
-            return str(report_path)
-
-        except Exception as e:
-            logger.error(f"통합 HTML 보고서 생성 실패: {str(e)}")
-            return f"통합 HTML 보고서 생성 실패: {str(e)}"
-
-    async def validate_selected_sql_files(
-        self, database_secret: str, sql_files: List[str]
-    ) -> str:
-        """선택한 SQL 파일들을 검증하고 통합보고서를 생성"""
-        try:
-            if not sql_files:
-                return "검증할 SQL 파일이 지정되지 않았습니다."
-
-            # 최대 10개 파일만 처리
-            files_to_process = sql_files[:10]
-            if len(sql_files) > 10:
-                logger.warning(
-                    f"SQL 파일이 {len(sql_files)}개 지정되었지만 처음 10개만 처리합니다."
-                )
-
-            validation_results = []
-            summary_results = []
-            detailed_reports = []
-
-            for filename in files_to_process:
-                try:
-                    sql_file_path = SQL_DIR / filename
-                    if not sql_file_path.exists():
-                        validation_results.append(
-                            {
-                                "filename": filename,
-                                "ddl_content": "",
-                                "ddl_type": "ERROR",
-                                "status": "ERROR",
-                                "issues": [f"파일을 찾을 수 없습니다: {filename}"],
-                                "warnings": [],
-                                "db_connection_info": None,
-                                "syntax_valid": False,
-                                "db_connected": False,
-                                "schema_valid": False,
-                                "constraint_valid": False,
-                                "ai_valid": False,
-                                "issue_count": 1,
-                                "full_result": f"파일을 찾을 수 없습니다: {filename}",
-                            }
-                        )
-                        summary_results.append(f"❌ **{filename}**: 파일 없음")
-                        continue
-
-                    # 파일 내용 읽기
-                    with open(sql_file_path, "r", encoding="utf-8") as f:
-                        ddl_content = f.read()
-
-                    # 개별 검증과 동일한 워크플로우 사용
-                    result = await self.execute_validation_workflow(
-                        ddl_content, database_secret, filename
-                    )
-
-                    # 결과에서 상태 파악 및 상세 정보 추출
-                    syntax_valid = "문법 검증: ✅ 통과" in result
-                    db_connected = "데이터베이스 연결: ✅ 성공" in result
-                    schema_valid = "스키마 검증: ✅ 통과" in result
-                    constraint_valid = "제약조건 검증: ✅ 통과" in result
-                    ai_valid = "Claude AI 검증: ✅ 통과" in result
-
-                    # 문제 개수 추출
-                    issue_match = re.search(r"발견된 문제: (\d+)개", result)
-                    issue_count = int(issue_match.group(1)) if issue_match else 0
-                    
-                    # 문법 오류 체크
-                    syntax_error_match = re.search(r"문법 오류로 인한 검증 실패: (\d+)개", result)
-                    if syntax_error_match:
-                        issue_count = int(syntax_error_match.group(1))
-                        syntax_valid = False
-                        db_connected = False
-
-                    if issue_count == 0 and "✅ 모든 검증을 통과했습니다" in result:
-                        status = "PASS"
-                        issues = []
-                    else:
-                        status = "FAIL"
-                        issues = [f"검증 실패 ({issue_count}개 문제 발견)"]
-
-                    validation_results.append(
-                        {
-                            "filename": filename,
-                            "ddl_content": ddl_content,
-                            "ddl_type": self.extract_ddl_type(ddl_content),
-                            "status": status,
-                            "issues": issues,
-                            "warnings": [],
-                            "db_connection_info": None,
-                            "syntax_valid": syntax_valid,
-                            "db_connected": db_connected,
-                            "schema_valid": schema_valid,
-                            "constraint_valid": constraint_valid,
-                            "ai_valid": ai_valid,
-                            "issue_count": issue_count,
-                            "full_result": result,
-                        }
-                    )
-
-                    # 상세 보고서 파일명 추출 (기존 개별 검증에서 생성된 파일)
-                    report_match = re.search(r"상세 보고서가 저장되었습니다: (.+\.html)", result)
-                    if report_match:
-                        detailed_reports.append({
-                            "filename": filename,
-                            "report_path": report_match.group(1)
-                        })
-
-                    # 요약 결과
-                    if status == "PASS":
-                        summary_results.append(f"✅ **{filename}**: 통과")
-                    else:
-                        summary_results.append(f"❌ **{filename}**: 실패 ({issue_count}개 문제)")
-
-                except Exception as e:
-                    validation_results.append(
-                        {
-                            "filename": filename,
-                            "ddl_content": "",
-                            "ddl_type": "ERROR",
-                            "status": "ERROR",
-                            "issues": [f"검증 중 오류 발생: {str(e)}"],
-                            "warnings": [],
-                            "db_connection_info": None,
-                            "syntax_valid": False,
-                            "db_connected": False,
-                            "schema_valid": False,
-                            "constraint_valid": False,
-                            "ai_valid": False,
-                            "issue_count": 1,
-                            "full_result": f"오류: {str(e)}",
-                        }
-                    )
-                    summary_results.append(f"❌ **{filename}**: 오류 - {str(e)}")
-
-            # 통합 HTML 보고서 생성 (클릭 가능한 링크 포함)
-            consolidated_report_path = await self.generate_consolidated_html_report_with_links(
-                validation_results, detailed_reports, database_secret
-            )
-
-            # 요약 통계
-            total_files = len(validation_results)
-            passed_files = sum(1 for r in validation_results if r["status"] == "PASS")
-            failed_files = total_files - passed_files
-
-            summary = f"""📊 선택한 SQL 파일 검증 완료
-
-📋 요약:
-• 총 파일: {total_files}개
-• 통과: {passed_files}개 ({passed_files/total_files*100:.1f}%)
-• 실패: {failed_files}개 ({failed_files/total_files*100:.1f}%)
-
-📄 종합 보고서: {consolidated_report_path}
-
-📊 개별 결과:
-{chr(10).join(summary_results)}"""
-
-            if len(sql_files) > 10:
-                summary += (
-                    f"\n\n⚠️ 전체 {len(sql_files)}개 파일 중 처음 10개만 처리되었습니다."
-                )
-
-            return summary
-
-        except Exception as e:
-            return f"선택한 SQL 파일 검증 실패: {str(e)}"
-
-    async def validate_multiple_sql_direct(
-        self, database_secret: str, file_count: int = 10
-    ) -> str:
-        """여러 SQL 파일을 직접 검증하고 통합보고서를 생성 (계획 없이 바로 실행)"""
-        try:
-            sql_files = list(SQL_DIR.glob("*.sql"))
-            if not sql_files:
-                return "sql 디렉토리에 SQL 파일이 없습니다."
-
-            # 지정된 개수만큼 파일 처리 (최대 15개)
-            file_count = min(file_count, 15)
-            files_to_process = sql_files[:file_count]
-            
-            if len(sql_files) > file_count:
-                logger.info(
-                    f"SQL 파일이 {len(sql_files)}개 있지만 처음 {file_count}개만 처리합니다."
-                )
-
-            validation_results = []
-            summary_results = []
-            detailed_reports = []
-
-            for sql_file in files_to_process:
-                try:
-                    # 파일 내용 읽기
-                    with open(sql_file, "r", encoding="utf-8") as f:
-                        ddl_content = f.read()
-
-                    # 개별 검증과 동일한 워크플로우 사용
-                    result = await self.execute_validation_workflow(
-                        ddl_content, database_secret, sql_file.name
-                    )
-
-                    # 결과에서 상태 파악 및 상세 정보 추출
-                    syntax_valid = "문법 검증: ✅ 통과" in result
-                    db_connected = "데이터베이스 연결: ✅ 성공" in result
-                    schema_valid = "스키마 검증: ✅ 통과" in result
-                    constraint_valid = "제약조건 검증: ✅ 통과" in result
-                    ai_valid = "Claude AI 검증: ✅ 통과" in result
-
-                    # 문제 개수 추출
-                    issue_match = re.search(r"발견된 문제: (\d+)개", result)
-                    issue_count = int(issue_match.group(1)) if issue_match else 0
-                    
-                    # 문법 오류 체크
-                    syntax_error_match = re.search(r"문법 오류로 인한 검증 실패: (\d+)개", result)
-                    if syntax_error_match:
-                        issue_count = int(syntax_error_match.group(1))
-                        syntax_valid = False
-                        db_connected = False
-
-                    if issue_count == 0 and "✅ 모든 검증을 통과했습니다" in result:
-                        status = "PASS"
-                        issues = []
-                    else:
-                        status = "FAIL"
-                        issues = [f"검증 실패 ({issue_count}개 문제 발견)"]
-
-                    validation_results.append(
-                        {
-                            "filename": sql_file.name,
-                            "ddl_content": ddl_content,
-                            "ddl_type": self.extract_ddl_type(ddl_content),
-                            "status": status,
-                            "issues": issues,
-                            "warnings": [],
-                            "db_connection_info": None,
-                            "syntax_valid": syntax_valid,
-                            "db_connected": db_connected,
-                            "schema_valid": schema_valid,
-                            "constraint_valid": constraint_valid,
-                            "ai_valid": ai_valid,
-                            "issue_count": issue_count,
-                            "full_result": result,
-                        }
-                    )
-
-                    # 상세 보고서 파일명 추출 (기존 개별 검증에서 생성된 파일)
-                    report_match = re.search(r"상세 보고서가 저장되었습니다: (.+\.html)", result)
-                    if report_match:
-                        detailed_reports.append({
-                            "filename": sql_file.name,
-                            "report_path": report_match.group(1)
-                        })
-
-                    # 요약 결과
-                    if status == "PASS":
-                        summary_results.append(f"✅ **{sql_file.name}**: 통과")
-                    else:
-                        summary_results.append(f"❌ **{sql_file.name}**: 실패 ({issue_count}개 문제)")
-
-                except Exception as e:
-                    validation_results.append(
-                        {
-                            "filename": sql_file.name,
-                            "ddl_content": "",
-                            "ddl_type": "ERROR",
-                            "status": "ERROR",
-                            "issues": [f"검증 중 오류 발생: {str(e)}"],
-                            "warnings": [],
-                            "db_connection_info": None,
-                            "syntax_valid": False,
-                            "db_connected": False,
-                            "schema_valid": False,
-                            "constraint_valid": False,
-                            "ai_valid": False,
-                            "issue_count": 1,
-                            "full_result": f"오류: {str(e)}",
-                        }
-                    )
-                    summary_results.append(f"❌ **{sql_file.name}**: 오류 - {str(e)}")
-
-            # 통합 HTML 보고서 생성 (클릭 가능한 링크 포함)
-            consolidated_report_path = await self.generate_consolidated_html_report_with_links(
-                validation_results, detailed_reports, database_secret
-            )
-
-            # 요약 통계
-            total_files = len(validation_results)
-            passed_files = sum(1 for r in validation_results if r["status"] == "PASS")
-            failed_files = total_files - passed_files
-
-            summary = f"""📊 SQL 파일 검증 완료 ({database_secret})
-
-📋 요약:
-• 총 파일: {total_files}개
-• 통과: {passed_files}개 ({passed_files/total_files*100:.1f}%)
-• 실패: {failed_files}개 ({failed_files/total_files*100:.1f}%)
-
-📄 통합 보고서: {consolidated_report_path}
-
-📊 개별 결과:
-{chr(10).join(summary_results)}"""
-
-            if len(sql_files) > file_count:
-                summary += (
-                    f"\n\n⚠️ 전체 {len(sql_files)}개 파일 중 처음 {file_count}개만 처리되었습니다."
-                )
-
-            return summary
-
-        except Exception as e:
-            return f"SQL 파일 검증 실패: {str(e)}"
 
     async def generate_consolidated_html_report(
         self, validation_results: List[Dict], database_secret: str
@@ -5727,44 +5123,6 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="validate_selected_sql_files",
-            description="선택한 SQL 파일들을 검증하고 통합보고서를 생성합니다",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "database_secret": {
-                        "type": "string",
-                        "description": "데이터베이스 시크릿 이름",
-                    },
-                    "sql_files": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "검증할 SQL 파일명 목록 (최대 10개)",
-                    }
-                },
-                "required": ["database_secret", "sql_files"],
-            },
-        ),
-        types.Tool(
-            name="validate_multiple_sql_direct",
-            description="여러 SQL 파일을 직접 검증하고 통합보고서를 생성합니다 (계획 없이 바로 실행)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "database_secret": {
-                        "type": "string",
-                        "description": "데이터베이스 시크릿 이름",
-                    },
-                    "file_count": {
-                        "type": "integer",
-                        "description": "검증할 파일 개수 (기본값: 10, 최대: 15)",
-                        "default": 10,
-                    }
-                },
-                "required": ["database_secret"],
-            },
-        ),
-        types.Tool(
             name="copy_sql_to_directory",
             description="SQL 파일을 sql 디렉토리로 복사합니다",
             inputSchema={
@@ -6159,16 +5517,6 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             # 자동 계획 생성 및 실행
             result = await ddl_validator.execute_with_auto_plan(
                 "validate_all_sql", database_secret=arguments.get("database_secret")
-            )
-        elif name == "validate_selected_sql_files":
-            # 선택한 SQL 파일들 검증
-            result = await ddl_validator.validate_selected_sql_files(
-                arguments["database_secret"], arguments["sql_files"]
-            )
-        elif name == "validate_multiple_sql_direct":
-            # 여러 SQL 파일 직접 검증
-            result = await ddl_validator.validate_multiple_sql_direct(
-                arguments["database_secret"], arguments.get("file_count", 10)
             )
         elif name == "copy_sql_to_directory":
             result = await ddl_validator.copy_sql_file(
