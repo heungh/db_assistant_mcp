@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gamedb1-cluster 검증 통합 보고서</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; text-align: center; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; border-left: 4px solid #3498db; padding-left: 15px; }
+        .summary { background: #ecf0f1; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .stats { display: flex; justify-content: space-around; margin: 20px 0; flex-wrap: wrap; }
+        .stat-box { text-align: center; padding: 15px; background: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 5px; min-width: 120px; }
+        .stat-number { font-size: 2em; font-weight: bold; color: #3498db; }
+        .stat-label { color: #7f8c8d; margin-top: 5px; font-size: 0.9em; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #3498db; color: white; font-weight: bold; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        tr.success { background-color: #d5f4e6 !important; }
+        tr.error { background-color: #fadbd8 !important; }
+        tr:hover { background-color: #e8f4f8 !important; }
+        .status-cell { text-align: center; font-weight: bold; }
+        .issue-count { text-align: center; font-weight: bold; color: #e74c3c; }
+        .detail-link { color: #3498db; text-decoration: none; font-weight: bold; }
+        .detail-link:hover { text-decoration: underline; }
+        .timestamp { color: #7f8c8d; font-size: 0.9em; text-align: center; margin-top: 30px; }
+        .click-hint { background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; border-radius: 5px; margin: 10px 0; text-align: center; color: #856404; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🗄️ gamedb1-cluster 검증 통합 보고서</h1>
+        
+        <div class="summary">
+            <h2>📊 검증 요약</h2>
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">총 검증 파일</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">1</div>
+                    <div class="stat-label">완전 통과</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">4</div>
+                    <div class="stat-label">실패</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">문법 통과</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">DB 연결 성공</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">3</div>
+                    <div class="stat-label">스키마 통과</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="click-hint">
+            💡 <strong>사용법:</strong> 아래 테이블의 각 행을 클릭하면 해당 파일의 상세 검증 보고서를 볼 수 있습니다.
+        </div>
+
+        <h2>📋 상세 검증 결과</h2>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>파일명</th>
+                    <th>문법 검증</th>
+                    <th>DB 연결</th>
+                    <th>스키마 검증</th>
+                    <th>제약조건 검증</th>
+                    <th>AI 검증</th>
+                    <th>총 문제 수</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+                <tr class="error" onclick="window.open('validation_report_test_alter_modify_reduce_length.sql_20250819_103506.html', '_blank')" style="cursor: pointer;">
+                    <td><a href="validation_report_test_alter_modify_reduce_length.sql_20250819_103506.html" target="_blank" class="detail-link">test_alter_modify_reduce_length.sql</a></td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 성공</td>
+                    <td class="status-cell">❌ 실패</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">❌ 실패</td>
+                    <td class="issue-count">2개</td>
+                </tr>
+                
+                <tr class="error" onclick="window.open('validation_report_test_datatype_issues.sql_20250819_103541.html', '_blank')" style="cursor: pointer;">
+                    <td><a href="validation_report_test_datatype_issues.sql_20250819_103541.html" target="_blank" class="detail-link">test_datatype_issues.sql</a></td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 성공</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">❌ 실패</td>
+                    <td class="issue-count">1개</td>
+                </tr>
+                
+                <tr class="success" onclick="window.open('validation_report_test_create_then_alter.sql_20250819_103608.html', '_blank')" style="cursor: pointer;">
+                    <td><a href="validation_report_test_create_then_alter.sql_20250819_103608.html" target="_blank" class="detail-link">test_create_then_alter.sql</a></td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 성공</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="issue-count">0개</td>
+                </tr>
+                
+                <tr class="error" onclick="window.open('validation_report_test_invalid_sequence.sql_20250819_103642.html', '_blank')" style="cursor: pointer;">
+                    <td><a href="validation_report_test_invalid_sequence.sql_20250819_103642.html" target="_blank" class="detail-link">test_invalid_sequence.sql</a></td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 성공</td>
+                    <td class="status-cell">❌ 실패</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">❌ 실패</td>
+                    <td class="issue-count">3개</td>
+                </tr>
+                
+                <tr class="error" onclick="window.open('validation_report_product_query.sql_20250819_103710.html', '_blank')" style="cursor: pointer;">
+                    <td><a href="validation_report_product_query.sql_20250819_103710.html" target="_blank" class="detail-link">product_query.sql</a></td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 성공</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">✅ 통과</td>
+                    <td class="status-cell">❌ 실패</td>
+                    <td class="issue-count">2개</td>
+                </tr>
+                
+            </tbody>
+        </table>
+
+        <h2>📈 검증 통계</h2>
+        
+        <div class="summary">
+            <ul>
+                <li><strong>총 검증 파일:</strong> 5개</li>
+                <li><strong>문법 검증 통과:</strong> 5개 (100.0%)</li>
+                <li><strong>데이터베이스 연결 성공:</strong> 5개 (100.0%)</li>
+                <li><strong>스키마 검증 통과:</strong> 3개 (60.0%)</li>
+                <li><strong>제약조건 검증 통과:</strong> 5개 (100.0%)</li>
+                <li><strong>AI 검증 통과:</strong> 1개 (20.0%)</li>
+                <li><strong>완전 통과 파일:</strong> 1개 (20.0%)</li>
+            </ul>
+        </div>
+
+        <h2>🎯 권장사항</h2>
+        
+        <div class="summary">
+            <ul>
+                <li><strong>문법 오류 우선 수정:</strong> 문법 검증에 실패한 파일들을 먼저 해결하세요.</li>
+                <li><strong>스키마 검증 문제 해결:</strong> 존재하지 않는 테이블/컬럼 참조 문제를 수정하세요.</li>
+                <li><strong>베스트 프랙티스 적용:</strong> AI 검증에서 제안하는 성능 최적화 및 보안 권고사항을 검토하세요.</li>
+                <li><strong>정기적인 검증:</strong> SQL 파일 변경 시 자동화된 검증 프로세스 도입을 검토하세요.</li>
+            </ul>
+        </div>
+
+        <div class="timestamp">
+            <p>📅 보고서 생성 시간: 2025-08-19 10:37:10 (UTC)</p>
+            <p>🗄️ 대상 데이터베이스: gamedb1-cluster</p>
+            <p>🔧 검증 도구: DB Assistant MCP Server v2.0</p>
+        </div>
+    </div>
+</body>
+</html>
