@@ -1,0 +1,998 @@
+#!/usr/bin/env python3
+"""
+DDL 검증 Amazon Q CLI MCP 서버 (간소화 버전)
+"""
+
+import asyncio
+import json
+import os
+import re
+import subprocess
+import time
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+from pathlib import Path
+
+import boto3
+try:
+    import mysql.connector
+    from mysql.connector import Error as MySQLError
+except ImportError:
+    mysql = None
+    MySQLError = Exception
+
+from mcp.server.models import InitializationOptions
+import mcp.types as types
+from mcp.server import NotificationOptions, Server
+import mcp.server.stdio
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 현재 디렉토리 기준 경로 설정
+CURRENT_DIR = Path(__file__).parent
+OUTPUT_DIR = CURRENT_DIR / "output"
+SQL_DIR = CURRENT_DIR / "sql"
+
+# 디렉토리 생성
+OUTPUT_DIR.mkdir(exist_ok=True)
+SQL_DIR.mkdir(exist_ok=True)
+
+class DDLValidationQCLIServer:
+    def __init__(self):
+        self.bedrock_client = boto3.client(
+            "bedrock-runtime", region_name="us-east-1", verify=False
+        )
+        self.knowledge_base_id = "0WQUBRHVR8"
+
+    def get_secret(self, secret_name):
+        """Secrets Manager에서 DB 연결 정보 가져오기"""
+        try:
+            session = boto3.session.Session()
+            client = session.client(
+                service_name="secretsmanager",
+                region_name="ap-northeast-2",
+                verify=False,
+            )
+            get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+            secret = get_secret_value_response["SecretString"]
+            return json.loads(secret)
+        except Exception as e:
+            logger.error(f"Secret 조회 실패: {e}")
+            raise e
+
+    def get_secrets_by_keyword(self, keyword=""):
+        """키워드로 Secret 목록 가져오기"""
+        try:
+            secrets_manager = boto3.client(
+                service_name="secretsmanager",
+                region_name="ap-northeast-2",
+                verify=False,
+            )
+            
+            if keyword:
+                response = secrets_manager.list_secrets()
+                # 키워드 필터링
+                filtered_secrets = [
+                    secret["Name"] for secret in response["SecretList"]
+                    if keyword.lower() in secret["Name"].lower()
+                ]
+                return filtered_secrets
+            else:
+                response = secrets_manager.list_secrets()
+                return [secret["Name"] for secret in response["SecretList"]]
+        except Exception as e:
+            logger.error(f"Secret 목록 조회 실패: {e}")
+            return []
+
+    async def list_sql_files(self) -> str:
+        """SQL 파일 목록 조회"""
+        try:
+            sql_files = list(SQL_DIR.glob("*.sql"))
+            if not sql_files:
+                return "sql 디렉토리에 SQL 파일이 없습니다."
+
+            file_list = "\n".join([f"- {f.name}" for f in sql_files])
+            return f"SQL 파일 목록:\n{file_list}"
+        except Exception as e:
+            return f"SQL 파일 목록 조회 실패: {str(e)}"
+
+    async def list_database_secrets(self, keyword: str = "") -> str:
+        """데이터베이스 시크릿 목록 조회"""
+        try:
+            secrets = self.get_secrets_by_keyword(keyword)
+            if not secrets:
+                return f"'{keyword}' 키워드로 찾은 시크릿이 없습니다." if keyword else "시크릿이 없습니다."
+            
+            secret_list = "\n".join([f"- {secret}" for secret in secrets])
+            return f"데이터베이스 시크릿 목록:\n{secret_list}"
+        except Exception as e:
+            return f"시크릿 목록 조회 실패: {str(e)}"
+
+    async def validate_sql_file(self, filename: str, database_secret: Optional[str] = None) -> str:
+        """특정 SQL 파일 검증"""
+        try:
+            sql_file_path = SQL_DIR / filename
+            if not sql_file_path.exists():
+                return f"SQL 파일을 찾을 수 없습니다: {filename}"
+
+            with open(sql_file_path, 'r', encoding='utf-8') as f:
+                ddl_content = f.read()
+
+            result = await self.validate_ddl(ddl_content, database_secret, filename)
+            return result
+        except Exception as e:
+            return f"SQL 파일 검증 실패: {str(e)}"
+
+    async def validate_ddl(self, ddl_content: str, database_secret: Optional[str], filename: str) -> str:
+        """DDL 검증 실행"""
+        try:
+            issues = []
+            db_connection_info = None
+            schema_validation = None
+            constraint_validation = None
+            
+            # 1. 기본 문법 검증
+            if not ddl_content.strip().endswith(";"):
+                issues.append("세미콜론이 누락되었습니다.")
+            
+            # 2. DDL 타입 확인
+            ddl_type = self.extract_ddl_type(ddl_content)
+            
+            # 3. 데이터베이스 연결 테스트 (database_secret이 제공된 경우)
+            if database_secret:
+                try:
+                    db_connection_info = await self.test_database_connection(database_secret)
+                    if not db_connection_info["success"]:
+                        issues.append(f"DB 연결 실패: {db_connection_info['error']}")
+                    else:
+                        # 4. 스키마 검증
+                        try:
+                            schema_validation = await self.validate_schema(ddl_content, database_secret)
+                            if schema_validation["success"]:
+                                for result in schema_validation["validation_results"]:
+                                    if result["column_issues"]:
+                                        issues.extend([f"스키마 검증: {issue}" for issue in result["column_issues"]])
+                            else:
+                                issues.append(f"스키마 검증 실패: {schema_validation['error']}")
+                        except Exception as e:
+                            logger.error(f"스키마 검증 오류: {e}")
+                            issues.append(f"스키마 검증 중 오류 발생: {str(e)}")
+                        
+                        # 5. 제약조건 검증
+                        try:
+                            constraint_validation = await self.validate_constraints(ddl_content, database_secret)
+                            if constraint_validation["success"]:
+                                for result in constraint_validation["constraint_results"]:
+                                    if not result["valid"]:
+                                        issues.append(f"제약조건 검증: {result['issue']}")
+                            else:
+                                issues.append(f"제약조건 검증 실패: {constraint_validation['error']}")
+                        except Exception as e:
+                            logger.error(f"제약조건 검증 오류: {e}")
+                            issues.append(f"제약조건 검증 중 오류 발생: {str(e)}")
+                            
+                except Exception as e:
+                    logger.error(f"DB 연결 테스트 오류: {e}")
+                    issues.append(f"DB 연결 테스트 중 오류 발생: {str(e)}")
+            
+            # 6. Claude를 통한 검증
+            try:
+                claude_result = await self.validate_with_claude(ddl_content)
+                if "문제" in claude_result or "오류" in claude_result or "위반" in claude_result:
+                    issues.append(f"Claude 검증: {claude_result[:200]}...")
+            except Exception as e:
+                logger.error(f"Claude 검증 오류: {e}")
+                issues.append(f"Claude 검증 중 오류 발생: {str(e)}")
+            
+            # 결과 생성
+            if not issues:
+                summary = "✅ 모든 검증을 통과했습니다."
+                status = "PASS"
+            else:
+                summary = f"❌ 발견된 문제: {len(issues)}개"
+                status = "FAIL"
+            
+            # 보고서 생성
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = OUTPUT_DIR / f"validation_report_{filename}_{timestamp}.md"
+            
+            # DB 연결 정보 섹션
+            db_info_section = ""
+            if db_connection_info:
+                if db_connection_info["success"]:
+                    db_info_section = f"""
+## 데이터베이스 연결 정보
+- **호스트**: {db_connection_info.get('host', 'N/A')}
+- **포트**: {db_connection_info.get('port', 'N/A')}
+- **데이터베이스**: {db_connection_info.get('current_database', 'N/A')}
+- **서버 버전**: {db_connection_info.get('server_version', 'N/A')}
+- **연결 상태**: ✅ 성공
+"""
+                else:
+                    db_info_section = f"""
+## 데이터베이스 연결 정보
+- **연결 상태**: ❌ 실패
+- **오류**: {db_connection_info.get('error', 'N/A')}
+"""
+            
+            # 스키마 검증 섹션
+            schema_section = ""
+            if schema_validation and schema_validation["success"]:
+                schema_section = "\n## 스키마 검증 결과\n"
+                for result in schema_validation["validation_results"]:
+                    status_icon = "✅" if result["exists"] and not result["column_issues"] else "❌"
+                    schema_section += f"- **테이블 {result['table']}**: {status_icon}\n"
+                    if result["column_issues"]:
+                        for issue in result["column_issues"]:
+                            schema_section += f"  - {issue}\n"
+                    if result["existing_columns"]:
+                        schema_section += f"  - 기존 컬럼: {', '.join(result['existing_columns'])}\n"
+            
+            # 제약조건 검증 섹션
+            constraint_section = ""
+            if constraint_validation and constraint_validation["success"]:
+                constraint_section = "\n## 제약조건 검증 결과\n"
+                for result in constraint_validation["constraint_results"]:
+                    status_icon = "✅" if result["valid"] else "❌"
+                    constraint_section += f"- **{result['type']}** {result['constraint']}: {status_icon}\n"
+                    if result["issue"]:
+                        constraint_section += f"  - {result['issue']}\n"
+            
+            report_content = f"""# DDL 검증 보고서
+
+**파일명**: {filename}
+**검증 일시**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**DDL 타입**: {ddl_type}
+**상태**: {status}
+**데이터베이스**: {database_secret or 'N/A'}
+{db_info_section}
+## 원본 DDL
+```sql
+{ddl_content}
+```
+
+## 검증 결과
+{summary}
+{schema_section}
+{constraint_section}
+## 발견된 문제
+{chr(10).join([f'- {issue}' for issue in issues]) if issues else '없음'}
+
+---
+*Generated by DDL Validation Q CLI MCP Server*
+"""
+            
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(report_content)
+            
+            return f"{summary}\n\n📄 상세 보고서가 저장되었습니다: {report_path}"
+            
+        except Exception as e:
+            return f"DDL 검증 중 오류 발생: {str(e)}"
+
+    def extract_ddl_type(self, ddl_content: str) -> str:
+        """DDL 타입 추출"""
+        ddl_upper = ddl_content.upper().strip()
+        if ddl_upper.startswith("CREATE TABLE"):
+            return "CREATE_TABLE"
+        elif ddl_upper.startswith("ALTER TABLE"):
+            return "ALTER_TABLE"
+        elif ddl_upper.startswith("CREATE INDEX"):
+            return "CREATE_INDEX"
+        elif ddl_upper.startswith("DROP"):
+            return "DROP"
+        else:
+            return "UNKNOWN"
+
+    def setup_ssh_tunnel(self, db_host: str, region: str = "ap-northeast-2") -> bool:
+        """SSH 터널 설정"""
+        try:
+            import subprocess
+            import time
+            
+            # 기존 터널 종료
+            subprocess.run(["pkill", "-f", "ssh.*54.180.79.255"], capture_output=True)
+            
+            # SSH 터널 시작 (ssh_tunnel.sh 방식 사용, SSH 설정 파일 무시)
+            ssh_command = [
+                "ssh",
+                "-F", "/dev/null",  # SSH 설정 파일 무시
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=no",
+                "-i", "/Users/heungh/test.pem",
+                "-f", "-N",
+                "-L", f"3307:{db_host}:3306",
+                "ec2-user@54.180.79.255"
+            ]
+            
+            logger.info(f"SSH 터널 설정 중: {db_host} -> localhost:3307")
+            
+            process = subprocess.run(ssh_command, capture_output=True, text=True)
+            
+            # 터널이 설정될 때까지 잠시 대기
+            time.sleep(3)
+            
+            if process.returncode == 0:
+                logger.info("SSH 터널이 설정되었습니다.")
+                return True
+            else:
+                logger.error(f"SSH 터널 설정 실패: {process.stderr}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"SSH 터널 설정 오류: {str(e)}")
+            return False
+
+    def cleanup_ssh_tunnel(self):
+        """SSH 터널 정리"""
+        try:
+            import subprocess
+            subprocess.run(["pkill", "-f", "ssh.*54.180.79.255"], capture_output=True)
+            logger.info("SSH 터널이 정리되었습니다.")
+        except Exception as e:
+            logger.error(f"SSH 터널 정리 중 오류: {e}")
+
+    async def test_database_connection(self, database_secret: str, use_ssh_tunnel: bool = True) -> Dict[str, Any]:
+        """데이터베이스 연결 테스트"""
+        if mysql is None:
+            return {
+                "success": False,
+                "error": "mysql-connector-python이 설치되지 않았습니다. pip install mysql-connector-python을 실행해주세요."
+            }
+        
+        try:
+            # Secret에서 DB 연결 정보 가져오기 (ap-northeast-2 리전)
+            session = boto3.session.Session()
+            client = session.client(
+                service_name="secretsmanager",
+                region_name="ap-northeast-2",
+                verify=False,
+            )
+            get_secret_value_response = client.get_secret_value(SecretId=database_secret)
+            secret = get_secret_value_response["SecretString"]
+            db_config = json.loads(secret)
+            
+            connection_config = None
+            tunnel_used = False
+            
+            if use_ssh_tunnel:
+                # SSH 터널 설정
+                if self.setup_ssh_tunnel(db_config.get('host')):
+                    # SSH 터널을 통한 연결 설정
+                    connection_config = {
+                        'host': 'localhost',
+                        'port': 3307,  # SSH 터널 포트
+                        'user': db_config.get('username'),
+                        'password': db_config.get('password'),
+                        'database': db_config.get('dbname', db_config.get('database')),
+                        'connection_timeout': 10,
+                        'autocommit': True
+                    }
+                    tunnel_used = True
+                    logger.info("SSH 터널을 통한 연결을 시도합니다.")
+                else:
+                    logger.warning("SSH 터널 설정 실패, 직접 연결을 시도합니다.")
+            
+            if not connection_config:
+                # 직접 연결 설정
+                connection_config = {
+                    'host': db_config.get('host'),
+                    'port': db_config.get('port', 3306),
+                    'user': db_config.get('username'),
+                    'password': db_config.get('password'),
+                    'database': db_config.get('dbname', db_config.get('database')),
+                    'connection_timeout': 10,
+                    'autocommit': True
+                }
+            
+            # 연결 테스트
+            connection = mysql.connector.connect(**connection_config)
+            
+            if connection.is_connected():
+                db_info = connection.get_server_info()
+                cursor = connection.cursor()
+                cursor.execute("SELECT DATABASE()")
+                current_db = cursor.fetchone()[0]
+                
+                # SHOW DATABASES 실행
+                cursor.execute("SHOW DATABASES")
+                databases = [db[0] for db in cursor.fetchall()]
+                
+                # 현재 DB의 테이블 목록
+                tables = []
+                if current_db:
+                    cursor.execute("SHOW TABLES")
+                    tables = [table[0] for table in cursor.fetchall()]
+                
+                cursor.close()
+                connection.close()
+                
+                result = {
+                    "success": True,
+                    "server_version": db_info,
+                    "current_database": current_db,
+                    "host": db_config.get('host'),
+                    "port": db_config.get('port', 3306),
+                    "connection_method": "SSH Tunnel" if tunnel_used else "Direct",
+                    "databases": databases,
+                    "tables": tables
+                }
+                
+                # SSH 터널 정리
+                if tunnel_used:
+                    self.cleanup_ssh_tunnel()
+                
+                return result
+            else:
+                if tunnel_used:
+                    self.cleanup_ssh_tunnel()
+                return {
+                    "success": False,
+                    "error": "데이터베이스 연결에 실패했습니다."
+                }
+                
+        except MySQLError as e:
+            if use_ssh_tunnel:
+                self.cleanup_ssh_tunnel()
+            return {
+                "success": False,
+                "error": f"MySQL 오류: {str(e)}"
+            }
+        except Exception as e:
+            if use_ssh_tunnel:
+                self.cleanup_ssh_tunnel()
+            return {
+                "success": False,
+                "error": f"연결 테스트 오류: {str(e)}"
+            }
+
+    async def validate_schema(self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = True) -> Dict[str, Any]:
+        """스키마 검증 - 테이블/컬럼 존재 여부 확인"""
+        if mysql is None:
+            return {
+                "success": False,
+                "error": "mysql-connector-python이 설치되지 않았습니다."
+            }
+        
+        try:
+            # DDL에서 테이블명과 컬럼 정보 추출
+            schema_info = self.parse_ddl_schema(ddl_content)
+            if not schema_info:
+                return {
+                    "success": False,
+                    "error": "DDL에서 스키마 정보를 추출할 수 없습니다."
+                }
+            
+            # DB 연결 설정
+            session = boto3.session.Session()
+            client = session.client(
+                service_name="secretsmanager",
+                region_name="ap-northeast-2",
+                verify=False,
+            )
+            get_secret_value_response = client.get_secret_value(SecretId=database_secret)
+            secret = get_secret_value_response["SecretString"]
+            db_config = json.loads(secret)
+            
+            connection_config = None
+            tunnel_used = False
+            
+            if use_ssh_tunnel:
+                # SSH 터널 설정
+                if self.setup_ssh_tunnel(db_config.get('host')):
+                    connection_config = {
+                        'host': 'localhost',
+                        'port': 3307,
+                        'user': db_config.get('username'),
+                        'password': db_config.get('password'),
+                        'database': db_config.get('dbname', db_config.get('database')),
+                        'connection_timeout': 10
+                    }
+                    tunnel_used = True
+            
+            if not connection_config:
+                connection_config = {
+                    'host': db_config.get('host'),
+                    'port': db_config.get('port', 3306),
+                    'user': db_config.get('username'),
+                    'password': db_config.get('password'),
+                    'database': db_config.get('dbname', db_config.get('database')),
+                    'connection_timeout': 10
+                }
+            
+            connection = mysql.connector.connect(**connection_config)
+            cursor = connection.cursor()
+            
+            validation_results = []
+            
+            for table_name, columns in schema_info.items():
+                # 테이블 존재 여부 확인
+                cursor.execute("""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema = DATABASE() AND table_name = %s
+                """, (table_name,))
+                
+                table_exists = cursor.fetchone()[0] > 0
+                
+                if table_exists:
+                    # 컬럼 존재 여부 확인
+                    cursor.execute("""
+                        SELECT column_name, data_type, is_nullable, column_default
+                        FROM information_schema.columns 
+                        WHERE table_schema = DATABASE() AND table_name = %s
+                    """, (table_name,))
+                    
+                    existing_columns = {row[0].lower(): {
+                        'data_type': row[1],
+                        'is_nullable': row[2],
+                        'column_default': row[3]
+                    } for row in cursor.fetchall()}
+                    
+                    column_issues = []
+                    for col_name in columns:
+                        if col_name.lower() not in existing_columns:
+                            column_issues.append(f"컬럼 '{col_name}'이 존재하지 않습니다.")
+                    
+                    validation_results.append({
+                        "table": table_name,
+                        "exists": True,
+                        "column_issues": column_issues,
+                        "existing_columns": list(existing_columns.keys())
+                    })
+                else:
+                    validation_results.append({
+                        "table": table_name,
+                        "exists": False,
+                        "column_issues": [f"테이블 '{table_name}'이 존재하지 않습니다."],
+                        "existing_columns": []
+                    })
+            
+            cursor.close()
+            connection.close()
+            
+            # SSH 터널 정리
+            if tunnel_used:
+                self.cleanup_ssh_tunnel()
+            
+            return {
+                "success": True,
+                "validation_results": validation_results
+            }
+            
+        except Exception as e:
+            if use_ssh_tunnel:
+                self.cleanup_ssh_tunnel()
+            return {
+                "success": False,
+                "error": f"스키마 검증 오류: {str(e)}"
+            }
+
+    async def validate_constraints(self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = True) -> Dict[str, Any]:
+        """제약조건 검증 - FK, 인덱스, 제약조건 확인"""
+        if mysql is None:
+            return {
+                "success": False,
+                "error": "mysql-connector-python이 설치되지 않았습니다."
+            }
+        
+        try:
+            # DDL에서 제약조건 정보 추출
+            constraints_info = self.parse_ddl_constraints(ddl_content)
+            
+            # DB 연결 설정
+            session = boto3.session.Session()
+            client = session.client(
+                service_name="secretsmanager",
+                region_name="ap-northeast-2",
+                verify=False,
+            )
+            get_secret_value_response = client.get_secret_value(SecretId=database_secret)
+            secret = get_secret_value_response["SecretString"]
+            db_config = json.loads(secret)
+            
+            connection_config = None
+            tunnel_used = False
+            
+            if use_ssh_tunnel:
+                # SSH 터널 설정
+                if self.setup_ssh_tunnel(db_config.get('host')):
+                    connection_config = {
+                        'host': 'localhost',
+                        'port': 3307,
+                        'user': db_config.get('username'),
+                        'password': db_config.get('password'),
+                        'database': db_config.get('dbname', db_config.get('database')),
+                        'connection_timeout': 10
+                    }
+                    tunnel_used = True
+            
+            if not connection_config:
+                connection_config = {
+                    'host': db_config.get('host'),
+                    'port': db_config.get('port', 3306),
+                    'user': db_config.get('username'),
+                    'password': db_config.get('password'),
+                    'database': db_config.get('dbname', db_config.get('database')),
+                    'connection_timeout': 10
+                }
+            
+            connection = mysql.connector.connect(**connection_config)
+            cursor = connection.cursor()
+            
+            constraint_results = []
+            
+            # 외래키 제약조건 검증
+            if constraints_info.get('foreign_keys'):
+                for fk in constraints_info['foreign_keys']:
+                    # 참조 테이블 존재 여부 확인
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM information_schema.tables 
+                        WHERE table_schema = DATABASE() AND table_name = %s
+                    """, (fk['referenced_table'],))
+                    
+                    ref_table_exists = cursor.fetchone()[0] > 0
+                    
+                    if ref_table_exists:
+                        # 참조 컬럼 존재 여부 확인
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM information_schema.columns 
+                            WHERE table_schema = DATABASE() 
+                            AND table_name = %s AND column_name = %s
+                        """, (fk['referenced_table'], fk['referenced_column']))
+                        
+                        ref_column_exists = cursor.fetchone()[0] > 0
+                        
+                        constraint_results.append({
+                            "type": "FOREIGN_KEY",
+                            "constraint": f"{fk['column']} -> {fk['referenced_table']}.{fk['referenced_column']}",
+                            "valid": ref_column_exists,
+                            "issue": None if ref_column_exists else f"참조 컬럼 '{fk['referenced_table']}.{fk['referenced_column']}'이 존재하지 않습니다."
+                        })
+                    else:
+                        constraint_results.append({
+                            "type": "FOREIGN_KEY",
+                            "constraint": f"{fk['column']} -> {fk['referenced_table']}.{fk['referenced_column']}",
+                            "valid": False,
+                            "issue": f"참조 테이블 '{fk['referenced_table']}'이 존재하지 않습니다."
+                        })
+            
+            cursor.close()
+            connection.close()
+            
+            # SSH 터널 정리
+            if tunnel_used:
+                self.cleanup_ssh_tunnel()
+            
+            return {
+                "success": True,
+                "constraint_results": constraint_results
+            }
+            
+        except Exception as e:
+            if use_ssh_tunnel:
+                self.cleanup_ssh_tunnel()
+            return {
+                "success": False,
+                "error": f"제약조건 검증 오류: {str(e)}"
+            }
+
+    def parse_ddl_schema(self, ddl_content: str) -> Dict[str, List[str]]:
+        """DDL에서 테이블과 컬럼 정보 추출"""
+        schema_info = {}
+        
+        # CREATE TABLE 패턴 매칭
+        create_table_pattern = r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?\s*\((.*?)\)'
+        matches = re.findall(create_table_pattern, ddl_content.upper(), re.DOTALL | re.IGNORECASE)
+        
+        for table_name, columns_def in matches:
+            # 컬럼 정의에서 컬럼명 추출
+            column_pattern = r'`?(\w+)`?\s+\w+'
+            columns = re.findall(column_pattern, columns_def)
+            schema_info[table_name.lower()] = [col.lower() for col in columns if col.upper() not in ['PRIMARY', 'KEY', 'FOREIGN', 'CONSTRAINT', 'INDEX']]
+        
+        # ALTER TABLE 패턴도 처리
+        alter_table_pattern = r'ALTER\s+TABLE\s+`?(\w+)`?\s+ADD\s+(?:COLUMN\s+)?`?(\w+)`?'
+        alter_matches = re.findall(alter_table_pattern, ddl_content.upper(), re.IGNORECASE)
+        
+        for table_name, column_name in alter_matches:
+            if table_name.lower() not in schema_info:
+                schema_info[table_name.lower()] = []
+            schema_info[table_name.lower()].append(column_name.lower())
+        
+        return schema_info
+
+    def parse_ddl_constraints(self, ddl_content: str) -> Dict[str, List[Dict]]:
+        """DDL에서 제약조건 정보 추출"""
+        constraints = {
+            'foreign_keys': [],
+            'indexes': [],
+            'primary_keys': []
+        }
+        
+        # 외래키 패턴 매칭
+        fk_pattern = r'FOREIGN\s+KEY\s*\(`?(\w+)`?\)\s*REFERENCES\s+`?(\w+)`?\s*\(`?(\w+)`?\)'
+        fk_matches = re.findall(fk_pattern, ddl_content, re.IGNORECASE)
+        
+        for column, ref_table, ref_column in fk_matches:
+            constraints['foreign_keys'].append({
+                'column': column,
+                'referenced_table': ref_table,
+                'referenced_column': ref_column
+            })
+        
+        return constraints
+
+    async def test_connection_only(self, database_secret: str) -> str:
+        """연결 테스트만 수행"""
+        try:
+            connection_result = await self.test_database_connection(database_secret, use_ssh_tunnel=True)
+            
+            if connection_result["success"]:
+                databases_list = "\n".join([f"   - {db}" for db in connection_result.get('databases', [])])
+                tables_list = "\n".join([f"   - {table}" for table in connection_result.get('tables', [])])
+                
+                return f"""✅ 데이터베이스 연결 성공!
+
+**연결 정보:**
+- 호스트: {connection_result.get('host', 'N/A')}
+- 포트: {connection_result.get('port', 'N/A')}
+- 연결 방식: {connection_result.get('connection_method', 'N/A')}
+- 현재 데이터베이스: {connection_result.get('current_database', 'N/A')}
+- 서버 버전: {connection_result.get('server_version', 'N/A')}
+
+**데이터베이스 목록:**
+{databases_list if databases_list else '   (없음)'}
+
+**현재 DB 테이블 목록:**
+{tables_list if tables_list else '   (없음)'}"""
+            else:
+                return f"❌ 데이터베이스 연결 실패: {connection_result['error']}"
+                
+        except Exception as e:
+            return f"연결 테스트 중 오류 발생: {str(e)}"
+
+    async def validate_with_claude(self, ddl_content: str) -> str:
+        """Claude를 사용한 검증"""
+        prompt = f"""
+        다음 DDL 문을 검증해주세요:
+        
+        {ddl_content}
+        
+        문법 오류, 표준 규칙 위반, 성능 문제가 있는지 확인해주세요.
+        문제가 있으면 구체적으로 지적해주세요. 문제가 없으면 "검증 통과"라고 응답해주세요.
+        """
+        
+        try:
+            claude_input = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                ],
+                "temperature": 0.3,
+            })
+
+            response = self.bedrock_client.invoke_model(
+                modelId="anthropic.claude-3-sonnet-20240229-v1:0", 
+                body=claude_input
+            )
+
+            response_body = json.loads(response.get("body").read())
+            return response_body.get("content", [{}])[0].get("text", "")
+
+        except Exception as e:
+            logger.error(f"Claude 호출 오류: {e}")
+            return f"Claude 호출 중 오류 발생: {str(e)}"
+
+# MCP 서버 설정
+server = Server("ddl-qcli-validator")
+ddl_validator = DDLValidationQCLIServer()
+
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    """사용 가능한 도구 목록 반환"""
+    return [
+        types.Tool(
+            name="list_sql_files",
+            description="sql 디렉토리의 SQL 파일 목록을 조회합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="list_database_secrets",
+            description="AWS Secrets Manager의 데이터베이스 시크릿 목록을 조회합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "검색할 키워드 (선택사항)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="validate_sql_file",
+            description="특정 SQL 파일을 검증합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "검증할 SQL 파일명"
+                    },
+                    "database_secret": {
+                        "type": "string", 
+                        "description": "데이터베이스 시크릿 이름 (선택사항)"
+                    }
+                },
+                "required": ["filename"]
+            }
+        ),
+        types.Tool(
+            name="test_database_connection",
+            description="데이터베이스 연결을 테스트합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database_secret": {
+                        "type": "string",
+                        "description": "데이터베이스 시크릿 이름"
+                    }
+                },
+                "required": ["database_secret"]
+            }
+        ),
+        types.Tool(
+            name="validate_all_sql",
+            description="sql 디렉토리의 SQL 파일들을 검증합니다 (최대 5개)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database_secret": {
+                        "type": "string",
+                        "description": "데이터베이스 시크릿 이름 (선택사항)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="copy_sql_to_directory",
+            description="SQL 파일을 sql 디렉토리로 복사합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_path": {
+                        "type": "string",
+                        "description": "복사할 SQL 파일의 경로"
+                    },
+                    "target_name": {
+                        "type": "string",
+                        "description": "대상 파일명 (선택사항, 기본값은 원본 파일명)"
+                    }
+                },
+                "required": ["source_path"]
+            }
+        )
+    ]
+
+    async def validate_all_sql_files(self, database_secret: Optional[str] = None) -> str:
+        """모든 SQL 파일 검증 (최대 5개)"""
+        try:
+            sql_files = list(SQL_DIR.glob("*.sql"))
+            if not sql_files:
+                return "sql 디렉토리에 SQL 파일이 없습니다."
+            
+            # 최대 5개 파일만 처리
+            files_to_process = sql_files[:5]
+            if len(sql_files) > 5:
+                logger.warning(f"SQL 파일이 {len(sql_files)}개 있지만 처음 5개만 처리합니다.")
+            
+            results = []
+            for sql_file in files_to_process:
+                try:
+                    result = await self.validate_sql_file(sql_file.name, database_secret)
+                    results.append(f"**{sql_file.name}**: {result.split(chr(10))[0]}")
+                except Exception as e:
+                    results.append(f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}")
+            
+            summary = f"📊 총 {len(files_to_process)}개 파일 검증 완료"
+            if len(sql_files) > 5:
+                summary += f" (전체 {len(sql_files)}개 중 5개 처리)"
+            
+            return f"{summary}\n\n" + "\n".join(results)
+            
+        except Exception as e:
+            return f"전체 SQL 파일 검증 실패: {str(e)}"
+
+    async def copy_sql_file(self, source_path: str, target_name: Optional[str] = None) -> str:
+        """SQL 파일을 sql 디렉토리로 복사"""
+        try:
+            source = Path(source_path)
+            if not source.exists():
+                return f"소스 파일을 찾을 수 없습니다: {source_path}"
+            
+            if not source.suffix.lower() == '.sql':
+                return f"SQL 파일이 아닙니다: {source_path}"
+            
+            # 대상 파일명 결정
+            if target_name:
+                if not target_name.endswith('.sql'):
+                    target_name += '.sql'
+                target_path = SQL_DIR / target_name
+            else:
+                target_path = SQL_DIR / source.name
+            
+            # 파일 복사
+            import shutil
+            shutil.copy2(source, target_path)
+            
+            return f"✅ SQL 파일이 복사되었습니다: {source.name} -> {target_path.name}"
+            
+        except Exception as e:
+            return f"SQL 파일 복사 실패: {str(e)}"
+
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    """도구 호출 처리"""
+    try:
+        if name == "list_sql_files":
+            result = await ddl_validator.list_sql_files()
+        elif name == "list_database_secrets":
+            result = await ddl_validator.list_database_secrets(
+                arguments.get("keyword", "")
+            )
+        elif name == "validate_sql_file":
+            result = await ddl_validator.validate_sql_file(
+                arguments["filename"],
+                arguments.get("database_secret")
+            )
+        elif name == "test_database_connection":
+            result = await ddl_validator.test_connection_only(
+                arguments["database_secret"]
+            )
+        elif name == "validate_all_sql":
+            result = await ddl_validator.validate_all_sql_files(
+                arguments.get("database_secret")
+            )
+        elif name == "copy_sql_to_directory":
+            result = await ddl_validator.copy_sql_file(
+                arguments["source_path"],
+                arguments.get("target_name")
+            )
+        else:
+            result = f"알 수 없는 도구: {name}"
+        
+        return [types.TextContent(type="text", text=result)]
+        
+    except Exception as e:
+        logger.error(f"도구 실행 오류: {e}")
+        return [types.TextContent(type="text", text=f"오류: {str(e)}")]
+
+async def main():
+    """메인 함수"""
+    try:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="ddl-qcli-validator",
+                    server_version="1.0.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
+    except Exception as e:
+        logger.error(f"서버 실행 오류: {e}")
+        raise e
+
+if __name__ == "__main__":
+    asyncio.run(main())

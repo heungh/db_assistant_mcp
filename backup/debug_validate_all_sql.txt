@@ -1,0 +1,78 @@
+===============================================
+validate_all_sql 오류 디버깅 보고서
+생성 시간: 2025-08-16 16:25:18 UTC
+===============================================
+
+🔍 문제 분석:
+--------------
+오류 메시지: 'DBAssistantMCPServer' object has no attribute 'detect_ddl_type'
+
+🎯 근본 원인:
+--------------
+validate_all_sql_files() 메서드에서 self.detect_ddl_type() 호출하지만,
+DBAssistantMCPServer 클래스에 detect_ddl_type 메서드가 정의되어 있지 않음.
+
+📍 오류 발생 위치:
+------------------
+파일: db_assistant_mcp_server.py
+라인: 2369
+코드: ddl_type = self.detect_ddl_type(ddl_content)
+
+🔧 해결 방법:
+--------------
+1. detect_ddl_type 메서드를 DBAssistantMCPServer 클래스에 추가
+2. 또는 기존 validate_sql_file_internal 메서드의 로직 재사용
+
+💡 권장 수정사항:
+------------------
+다음 메서드를 DBAssistantMCPServer 클래스에 추가:
+
+def detect_ddl_type(self, ddl_content: str) -> str:
+    """DDL 타입 감지"""
+    ddl_upper = ddl_content.upper().strip()
+    
+    if ddl_upper.startswith('CREATE TABLE'):
+        return 'CREATE_TABLE'
+    elif ddl_upper.startswith('ALTER TABLE'):
+        return 'ALTER_TABLE'
+    elif ddl_upper.startswith('DROP TABLE'):
+        return 'DROP_TABLE'
+    elif ddl_upper.startswith('CREATE INDEX'):
+        return 'CREATE_INDEX'
+    elif ddl_upper.startswith('DROP INDEX'):
+        return 'DROP_INDEX'
+    elif ddl_upper.startswith('INSERT'):
+        return 'INSERT'
+    elif ddl_upper.startswith('UPDATE'):
+        return 'UPDATE'
+    elif ddl_upper.startswith('DELETE'):
+        return 'DELETE'
+    elif ddl_upper.startswith('SELECT'):
+        return 'SELECT'
+    else:
+        return 'UNKNOWN'
+
+🔄 대안 해결책:
+----------------
+validate_all_sql_files 메서드에서 detect_ddl_type 호출 부분을 다음과 같이 수정:
+
+# 기존 코드
+ddl_type = self.detect_ddl_type(ddl_content)
+
+# 수정된 코드
+ddl_type = "DDL"  # 임시 값 또는 간단한 인라인 감지 로직
+
+📊 영향도 분석:
+----------------
+- 영향받는 기능: validate_all_sql 도구
+- 개별 파일 검증: 정상 작동 (validate_sql_file)
+- 다른 기능들: 영향 없음
+
+🚀 즉시 적용 가능한 임시 수정:
+-------------------------------
+라인 2369를 다음과 같이 수정:
+ddl_type = "DDL"  # detect_ddl_type 메서드 누락으로 임시 값 사용
+
+===============================================
+디버깅 완료
+===============================================
