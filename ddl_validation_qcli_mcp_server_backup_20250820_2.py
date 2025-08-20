@@ -259,139 +259,59 @@ class DBAssistantMCPServer:
         except Exception as e:
             logger.error(f"SSH 터널 정리 중 오류: {e}")
 
-    async def validate_individual_ddl_statements(self, sql_content: str, cursor, debug_log, cte_tables: List[str]):
-        """개별 DDL 구문 검증 - CREATE TABLE/INDEX 각각 검증"""
-        debug_log("🔥🔥🔥 validate_individual_ddl_statements 함수 시작 🔥🔥🔥")
-        result = {"issues": []}
-        
+    async def validate_table_existence_with_cursor(
+        self, sql_content: str, cursor, debug_log
+    ):
+        """테이블 존재성 검증 (커서 사용) - CREATE 구문 고려"""
+        result = {"issues": [], "tables_checked": []}
+
         try:
-            # DDL 구문 파싱
-            ddl_statements = self.parse_ddl_statements(sql_content)
-            debug_log(f"파싱된 DDL 구문 수: {len(ddl_statements)}")
-            
-            # 파일 내에서 생성되는 테이블 목록 추출
-            tables_created_in_file = set()
-            for ddl in ddl_statements:
-                if ddl['type'] == 'CREATE_TABLE' and ddl['table'] not in cte_tables:
-                    tables_created_in_file.add(ddl['table'])
-            debug_log(f"파일 내 생성 테이블: {list(tables_created_in_file)}")
-            
-            for i, ddl in enumerate(ddl_statements):
-                debug_log(f"DDL [{i}] 검증 시작: {ddl['type']} - {ddl.get('table', ddl.get('index_name', 'unknown'))}")
-                
-                if ddl['type'] == 'CREATE_TABLE':
-                    table_name = ddl['table']
-                    
-                    # CTE alias는 스킵
-                    if table_name in cte_tables:
-                        debug_log(f"CREATE TABLE [{i}] - {table_name}은 CTE alias이므로 스킵")
+            if cursor is None:
+                debug_log("커서가 None입니다")
+                result["issues"].append("데이터베이스 커서가 없습니다.")
+                return result
+
+            # 현재 SQL에서 생성되는 테이블/인덱스 추출
+            created_tables = self.extract_created_tables(sql_content)
+            created_indexes = self.extract_created_indexes(sql_content)
+            debug_log(f"현재 SQL에서 생성되는 테이블: {created_tables}")
+            debug_log(f"현재 SQL에서 생성되는 인덱스: {created_indexes}")
+
+            # SQL에서 참조되는 모든 테이블명 추출
+            referenced_tables = self.extract_table_names(sql_content)
+            debug_log(f"참조되는 테이블명: {referenced_tables}")
+
+            for table in referenced_tables:
+                result["tables_checked"].append(table)
+
+                try:
+                    # 현재 SQL에서 생성되는 테이블이면 검증 스킵
+                    if table in created_tables:
+                        debug_log(f"테이블 '{table}' - 현재 SQL에서 생성되므로 검증 스킵")
                         continue
-                    
+
                     # 테이블 존재 여부 확인
-                    cursor.execute("SHOW TABLES LIKE %s", (table_name,))
+                    cursor.execute("SHOW TABLES LIKE %s", (table,))
                     exists = cursor.fetchone()
-                    
-                    if exists:
-                        issue = f"CREATE TABLE 실패: 테이블 '{table_name}'이 이미 존재합니다."
+
+                    if not exists:
+                        issue = f"테이블 '{table}'이 존재하지 않습니다."
                         result["issues"].append(issue)
-                        debug_log(f"CREATE TABLE [{i}] - {table_name} 실패: 이미 존재")
+                        debug_log(f"테이블 존재성 검증 실패: {table}")
                     else:
-                        debug_log(f"CREATE TABLE [{i}] - {table_name} 성공: 존재하지 않음")
-                
-                elif ddl['type'] == 'CREATE_INDEX':
-                    table_name = ddl['table']
-                    index_name = ddl['index_name']
-                    columns = ddl['columns']
-                    
-                    # CTE alias 테이블은 스킵
-                    if table_name in cte_tables:
-                        debug_log(f"CREATE INDEX [{i}] - {table_name}은 CTE alias이므로 스킵")
-                        continue
-                    
-                    # 테이블 존재 여부 확인 (DB + 파일 내 생성)
-                    cursor.execute("SHOW TABLES LIKE %s", (table_name,))
-                    table_exists_in_db = cursor.fetchone()
-                    table_created_in_file = table_name in tables_created_in_file
-                    
-                    if not table_exists_in_db and not table_created_in_file:
-                        issue = f"CREATE INDEX 실패: 테이블 '{table_name}'이 존재하지 않습니다."
-                        result["issues"].append(issue)
-                        debug_log(f"CREATE INDEX [{i}] - {table_name}.{index_name} 실패: 테이블 없음")
-                        continue
-                    
-                    # 테이블이 파일 내에서 생성되는 경우, 인덱스 중복 검사 스킵
-                    if table_created_in_file:
-                        debug_log(f"CREATE INDEX [{i}] - {table_name}.{index_name} 성공: 파일 내 생성 테이블")
-                        continue
-                    
-                    # 기존 테이블의 중복 인덱스 확인
-                    cursor.execute(f"SHOW INDEX FROM `{table_name}`")
-                    existing_indexes = cursor.fetchall()
-                    
-                    # 동일한 컬럼에 대한 인덱스가 이미 있는지 확인
-                    duplicate_found = False
-                    for existing_idx in existing_indexes:
-                        if existing_idx[4] == columns:  # Column_name
-                            issue = f"CREATE INDEX 실패: 테이블 '{table_name}'의 컬럼 '{columns}'에 이미 인덱스 '{existing_idx[2]}'가 존재합니다."
-                            result["issues"].append(issue)
-                            debug_log(f"CREATE INDEX [{i}] - {table_name}.{index_name} 실패: 중복 인덱스")
-                            duplicate_found = True
-                            break
-                    
-                    if not duplicate_found:
-                        debug_log(f"CREATE INDEX [{i}] - {table_name}.{index_name} 성공: 중복 없음")
-            
-            debug_log(f"🔥🔥🔥 validate_individual_ddl_statements 완료: {len(result['issues'])}개 이슈 🔥🔥🔥")
+                        debug_log(f"테이블 존재성 검증 통과: {table}")
+
+                except Exception as e:
+                    issue = f"테이블 '{table}' 검증 중 오류: {str(e)}"
+                    result["issues"].append(issue)
+                    debug_log(f"테이블 검증 오류: {table} - {e}")
+
             return result
-            
+
         except Exception as e:
-            debug_log(f"개별 DDL 검증 오류: {e}")
-            result["issues"].append(f"DDL 검증 오류: {str(e)}")
+            debug_log(f"테이블 존재성 검증 예외: {e}")
+            result["issues"].append(f"테이블 존재성 검증 오류: {str(e)}")
             return result
-
-    def extract_successful_created_tables(self, sql_content: str, issues: List[str]) -> List[str]:
-        """성공한 CREATE TABLE만 추출 (실패한 것은 제외)"""
-        created_tables = self.extract_created_tables(sql_content)
-        successful_tables = []
-        
-        for table in created_tables:
-            # issues에서 해당 테이블의 CREATE TABLE 실패 메시지가 있는지 확인
-            table_failed = any(f"테이블 '{table}'이 이미 존재합니다" in issue for issue in issues)
-            if not table_failed:
-                successful_tables.append(table)
-        
-        return successful_tables
-
-    def validate_dml_columns_with_context(self, sql_content: str, cursor, debug_log, available_tables: List[str]):
-        """컨텍스트를 고려한 DML 컬럼 검증"""
-        # 기존 validate_dml_columns 로직을 사용하되, available_tables를 고려
-        # 이 함수는 기존 함수를 확장한 버전입니다
-        return self.validate_dml_columns(sql_content, cursor, debug_log)
-
-    def parse_ddl_statements(self, sql_content: str) -> List[Dict[str, Any]]:
-        """DDL 구문을 파싱하여 개별 구문으로 분리"""
-        statements = []
-        
-        # CREATE TABLE 파싱
-        create_table_pattern = r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?\s*\('
-        for match in re.finditer(create_table_pattern, sql_content, re.IGNORECASE):
-            statements.append({
-                'type': 'CREATE_TABLE',
-                'table': match.group(1)
-            })
-        
-        # CREATE INDEX 파싱
-        create_index_pattern = r'CREATE\s+(?:UNIQUE\s+)?INDEX\s+`?(\w+)`?\s+ON\s+`?(\w+)`?\s*\(\s*`?(\w+)`?'
-        for match in re.finditer(create_index_pattern, sql_content, re.IGNORECASE):
-            statements.append({
-                'type': 'CREATE_INDEX',
-                'index_name': match.group(1),
-                'table': match.group(2),
-                'columns': match.group(3)
-            })
-        
-        return statements
-
 
     async def execute_explain_with_cursor(self, sql_content: str, cursor, debug_log):
         """EXPLAIN 실행 (커서 사용)"""
@@ -574,6 +494,20 @@ class DBAssistantMCPServer:
             result["valid"] = False
             result["issues"].append(f"스키마 검증 오류: {str(e)}")
             return result
+                if table_name:
+                    cursor.execute("SHOW TABLES LIKE %s", (table_name,))
+                    if not cursor.fetchone():
+                        result["valid"] = False
+                        result["issues"].append(
+                            f"테이블 '{table_name}'이 존재하지 않습니다."
+                        )
+
+            return result
+
+        except Exception as e:
+            result["valid"] = False
+            result["issues"].append(f"스키마 검증 오류: {str(e)}")
+            return result
 
     async def validate_constraints_with_cursor(self, ddl_content: str, cursor):
         """제약조건 검증 (커서 사용)"""
@@ -652,20 +586,6 @@ class DBAssistantMCPServer:
 
         return result
 
-    def extract_table_name_from_alter(self, ddl_content: str) -> str:
-        """ALTER TABLE 구문에서 테이블명 추출"""
-        # 주석 제거
-        sql_clean = re.sub(r"--.*$", "", ddl_content, flags=re.MULTILINE)
-        sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
-        
-        # ALTER TABLE 패턴
-        alter_pattern = r"ALTER\s+TABLE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s+"
-        match = re.search(alter_pattern, sql_clean, re.IGNORECASE)
-        
-        if match:
-            return match.group(1)
-        return None
-
     def extract_created_tables(self, sql_content: str) -> List[str]:
         """현재 SQL에서 생성되는 테이블명 추출"""
         tables = set()
@@ -674,15 +594,10 @@ class DBAssistantMCPServer:
         sql_clean = re.sub(r"--.*$", "", sql_content, flags=re.MULTILINE)
         sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
         
-        # CREATE TABLE 패턴 - 더 정확한 매칭
+        # CREATE TABLE 패턴
         create_pattern = r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s*\("
         create_matches = re.findall(create_pattern, sql_clean, re.IGNORECASE)
-        
-        # 유효한 테이블명만 필터링 (SQL 키워드 제외)
-        sql_keywords = {'and', 'or', 'not', 'in', 'on', 'as', 'is', 'if', 'by', 'to', 'from', 'where', 'select', 'insert', 'update', 'delete'}
-        for table in create_matches:
-            if table.lower() not in sql_keywords and len(table) > 1:
-                tables.add(table)
+        tables.update(create_matches)
         
         return list(tables)
 
@@ -700,124 +615,60 @@ class DBAssistantMCPServer:
         indexes.update(index_matches)
         
         return list(indexes)
-
-    def extract_cte_tables(self, sql_content: str) -> List[str]:
-        """WITH절의 CTE(Common Table Expression) 테이블명 추출"""
-        cte_tables = set()
-        
-        # 주석 제거
-        sql_clean = re.sub(r"--.*$", "", sql_content, flags=re.MULTILINE)
-        sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
-        
-        # WITH RECURSIVE 패턴 (가장 일반적)
-        recursive_with_pattern = r"WITH\s+(?:RECURSIVE\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\("
-        recursive_matches = re.findall(recursive_with_pattern, sql_clean, re.IGNORECASE)
-        cte_tables.update(recursive_matches)
-        
-        # 추가 CTE 테이블들 (쉼표 후)
-        additional_cte_pattern = r",\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\("
-        additional_matches = re.findall(additional_cte_pattern, sql_clean, re.IGNORECASE)
-        cte_tables.update(additional_matches)
-        
-        return list(cte_tables)
-
-    def extract_foreign_keys(self, ddl_content: str) -> List[Dict[str, str]]:
-        """DDL에서 외래키 정보 추출"""
-        foreign_keys = []
-        
-        # 주석 제거
-        ddl_clean = re.sub(r"--.*$", "", ddl_content, flags=re.MULTILINE)
-        ddl_clean = re.sub(r"/\*.*?\*/", "", ddl_clean, flags=re.DOTALL)
-        
-        # FOREIGN KEY 패턴 매칭
-        fk_pattern = r"FOREIGN\s+KEY\s*\(\s*([^)]+)\s*\)\s*REFERENCES\s+([^\s(]+)\s*\(\s*([^)]+)\s*\)"
-        matches = re.finditer(fk_pattern, ddl_clean, re.IGNORECASE)
-        
-        for match in matches:
-            column = match.group(1).strip().strip('`')
-            ref_table = match.group(2).strip().strip('`')
-            ref_column = match.group(3).strip().strip('`')
-            
-            foreign_keys.append({
-                "column": column,
-                "referenced_table": ref_table,
-                "referenced_column": ref_column
-            })
-        
-        return foreign_keys
-
-    def extract_table_names(self, sql_content: str) -> List[str]:
-        """SQL에서 테이블명 추출 (WITH절 CTE 테이블 제외)"""
+        """SQL에서 테이블명 추출 - 정확한 패턴 매칭"""
         tables = set()
-        
+
         # 주석 제거
         sql_clean = re.sub(r"--.*$", "", sql_content, flags=re.MULTILINE)
         sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
 
-        # WITH절의 CTE 테이블들 추출
-        cte_tables = set(self.extract_cte_tables(sql_content))
-        
-        # MySQL 키워드들 (테이블명이 아닌 것들)
-        mysql_keywords = {
-            'CURRENT_TIMESTAMP', 'NOW', 'NULL', 'TRUE', 'FALSE', 'DEFAULT',
-            'AUTO_INCREMENT', 'PRIMARY', 'KEY', 'UNIQUE', 'INDEX', 'FOREIGN',
-            'REFERENCES', 'ON', 'DELETE', 'UPDATE', 'CASCADE', 'SET', 'RESTRICT',
-            'NO', 'ACTION', 'CHECK', 'CONSTRAINT', 'ENUM', 'VARCHAR', 'INT',
-            'DECIMAL', 'DATETIME', 'TIMESTAMP', 'TEXT', 'BOOLEAN', 'TINYINT',
-            'SMALLINT', 'MEDIUMINT', 'BIGINT', 'FLOAT', 'DOUBLE', 'CHAR',
-            'BINARY', 'VARBINARY', 'BLOB', 'TINYBLOB', 'MEDIUMBLOB', 'LONGBLOB',
-            'TINYTEXT', 'MEDIUMTEXT', 'LONGTEXT', 'DATE', 'TIME', 'YEAR'
-        }
+        print(f"DEBUG: SQL 내용 = {sql_clean}")
 
         # CREATE TABLE 패턴 - 가장 정확한 방법
         create_pattern = r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s*\("
         create_matches = re.findall(create_pattern, sql_clean, re.IGNORECASE)
-        for table in create_matches:
-            if table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: CREATE 매치 = {create_matches}")
+        tables.update(create_matches)
 
         # ALTER TABLE 패턴
         alter_pattern = r"ALTER\s+TABLE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s+"
         alter_matches = re.findall(alter_pattern, sql_clean, re.IGNORECASE)
-        for table in alter_matches:
-            if table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: ALTER 매치 = {alter_matches}")
+        tables.update(alter_matches)
 
         # DROP TABLE 패턴
         drop_pattern = r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?([a-zA-Z_][a-zA-Z0-9_]*)`?"
         drop_matches = re.findall(drop_pattern, sql_clean, re.IGNORECASE)
-        for table in drop_matches:
-            if table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: DROP 매치 = {drop_matches}")
+        tables.update(drop_matches)
 
-        # FROM 패턴 (SELECT, DELETE) - 더 정확한 패턴 사용
-        from_pattern = r"\bFROM\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s+(?:AS\s+)?[a-zA-Z_][a-zA-Z0-9_]*)?(?:\s|$|,|;|\)|WHERE|ORDER|GROUP|LIMIT|JOIN|INNER|LEFT|RIGHT|FULL|CROSS)"
+        # FROM 패턴 (SELECT, DELETE)
+        from_pattern = r"FROM\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s|$|,|;|\)|WHERE|ORDER|GROUP|LIMIT|JOIN)"
         from_matches = re.findall(from_pattern, sql_clean, re.IGNORECASE)
-        for table in from_matches:
-            if table not in cte_tables and table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: FROM 매치 = {from_matches}")
+        tables.update(from_matches)
 
-        # JOIN 패턴 - 더 정확한 패턴 사용
-        join_pattern = r"\b(?:INNER\s+|LEFT\s+|RIGHT\s+|FULL\s+|CROSS\s+)?JOIN\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s+(?:AS\s+)?[a-zA-Z_][a-zA-Z0-9_]*)?(?:\s|$|,|;|\)|ON)"
+        # JOIN 패턴
+        join_pattern = r"JOIN\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s|$|,|;|\)|ON)"
         join_matches = re.findall(join_pattern, sql_clean, re.IGNORECASE)
-        for table in join_matches:
-            if table not in cte_tables and table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: JOIN 매치 = {join_matches}")
+        tables.update(join_matches)
 
         # UPDATE 패턴
-        update_pattern = r"\bUPDATE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s|$|,|;|\)|SET)"
+        update_pattern = r"UPDATE\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s|$|,|;|\)|SET)"
         update_matches = re.findall(update_pattern, sql_clean, re.IGNORECASE)
-        for table in update_matches:
-            if table not in cte_tables and table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: UPDATE 매치 = {update_matches}")
+        tables.update(update_matches)
 
         # INSERT INTO 패턴
-        insert_pattern = r"\bINSERT\s+INTO\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s|$|,|;|\)|\()"
+        insert_pattern = (
+            r"INSERT\s+INTO\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?(?:\s|$|,|;|\)|\()"
+        )
         insert_matches = re.findall(insert_pattern, sql_clean, re.IGNORECASE)
-        for table in insert_matches:
-            if table not in cte_tables and table.upper() not in mysql_keywords:
-                tables.add(table)
+        print(f"DEBUG: INSERT 매치 = {insert_matches}")
+        tables.update(insert_matches)
 
+        print(f"DEBUG: 최종 테이블 목록 = {list(tables)}")
         return list(tables)
 
     async def execute_explain(self, sql_content: str, connection, debug_log):
@@ -1562,9 +1413,6 @@ class DBAssistantMCPServer:
             constraint_validation = None
             explain_result = None
 
-            # 변수 초기화
-            dml_column_issues = []
-            
             # 1. 기본 문법 검증 - 개선된 세미콜론 검증
             semicolon_valid = self.validate_semicolon_usage(ddl_content)
             if not semicolon_valid:
@@ -1603,31 +1451,23 @@ class DBAssistantMCPServer:
                     if cursor:
                         debug_log("공용 커서 사용 시작")
 
-                        # WITH절 확인
-                        cte_tables = self.extract_cte_tables(ddl_content)
-                        has_with_clause = len(cte_tables) > 0
-                        debug_log(f"WITH절 CTE 테이블: {cte_tables}")
-                        debug_log(f"WITH절 존재 여부: {has_with_clause}")
-
                         # DDL 검증
                         if sql_type in ddl_types:
                             debug_log(f"DDL 검증 수행: {sql_type}")
-                            debug_log("=== 새로운 개별 DDL 검증 로직 시작 ===")
-                            
-                            # 개별 DDL 구문 검증 (WITH절과 관계없이 실행)
-                            ddl_validation = await self.validate_individual_ddl_statements(
-                                ddl_content, cursor, debug_log, cte_tables
+                            # 테이블 존재성 검증 (공용 커서 사용)
+                            table_validation = (
+                                await self.validate_table_existence_with_cursor(
+                                    ddl_content, cursor, debug_log
+                                )
                             )
-                            debug_log(f"개별 DDL 검증 완료: {len(ddl_validation['issues'])}개 이슈")
-                            if ddl_validation["issues"]:
-                                issues.extend(ddl_validation["issues"])
+                            if table_validation["issues"]:
+                                issues.extend(table_validation["issues"])
 
                         # DQL(DML) 검증
                         elif sql_type in dql_types:
                             debug_log(f"DQL 검증 수행: {sql_type}")
-                            
-                            # DML 검증 (CTE alias는 스킵하되, 실제 테이블은 검증)
                             debug_log("개별 쿼리 EXPLAIN 함수 호출 시작")
+                            # 개별 쿼리로 분리하여 EXPLAIN 실행
                             explain_result = await self.execute_explain_individual_queries(
                                 ddl_content, cursor, debug_log
                             )
@@ -1653,19 +1493,7 @@ class DBAssistantMCPServer:
                     debug_log("DML 컬럼 검증 시작")
                     cursor = self.get_shared_cursor()
                     if cursor:
-                        # 성공한 CREATE TABLE만 추출 (실패한 것은 제외)
-                        successful_created_tables = self.extract_successful_created_tables(ddl_content, issues)
-                        debug_log(f"성공한 CREATE TABLE: {successful_created_tables}")
-                        
-                        # CTE alias 추출
-                        cte_tables = self.extract_cte_tables(ddl_content)
-                        debug_log(f"CTE alias 테이블: {cte_tables}")
-                        
-                        # DML 컬럼 검증 (성공한 테이블과 CTE alias는 스킵)
-                        available_tables = successful_created_tables + cte_tables
-                        dml_validation_result = self.validate_dml_columns_with_context(
-                            ddl_content, cursor, debug_log, available_tables
-                        )
+                        dml_validation_result = self.validate_dml_columns(ddl_content, cursor, debug_log)
                         debug_log(f"DML 검증 결과: {dml_validation_result}")
                         if dml_validation_result['queries_with_issues'] > 0:
                             for query_result in dml_validation_result['results']:
@@ -1710,12 +1538,8 @@ class DBAssistantMCPServer:
                     except Exception as e:
                         debug_log(f"스키마 정보 추출 실패: {e}")
 
-                # 스키마 검증 결과 요약 생성
-                schema_validation_summary = self.create_schema_validation_summary(issues, dml_column_issues)
-                debug_log(f"스키마 검증 요약 생성: {schema_validation_summary}")
-
                 claude_result = await self.validate_with_claude(
-                    ddl_content, database_secret, relevant_schema_info, explain_info_str, sql_type, schema_validation_summary
+                    ddl_content, database_secret, relevant_schema_info, explain_info_str, sql_type
                 )
                 debug_log(f"Claude 검증 결과: {claude_result}")
                 debug_log(f"스키마 정보 전달됨: {relevant_schema_info is not None}")
@@ -1749,15 +1573,8 @@ class DBAssistantMCPServer:
             debug_log(f"최종 이슈 개수: {len(issues)}")
             debug_log(f"이슈 목록: {issues}")
 
-            # Claude 검증 결과를 기반으로 최종 상태 결정
-            claude_success = claude_analysis_result and claude_analysis_result.startswith("검증 통과")
-            
-            # 결과 생성 - Claude 검증이 성공이면 우선적으로 PASS 처리
-            if claude_success and not any("오류:" in issue or "실패" in issue or "존재하지 않" in issue for issue in issues):
-                summary = "✅ 모든 검증을 통과했습니다."
-                status = "PASS"
-                debug_log("Claude 검증 성공으로 최종 상태를 PASS로 설정")
-            elif not issues:
+            # 결과 생성
+            if not issues:
                 summary = "✅ 모든 검증을 통과했습니다."
                 status = "PASS"
             else:
@@ -1772,30 +1589,21 @@ class DBAssistantMCPServer:
 
             # HTML 보고서 생성
             debug_log("HTML 보고서 생성 시작")
-            debug_log(f"dml_column_issues 값: {dml_column_issues}")
-            debug_log(f"report_path 값: {report_path}")
-            try:
-                await self.generate_html_report(
-                    report_path,
-                    filename,
-                    ddl_content,
-                    sql_type,
-                    status,
-                    summary,
-                    issues,
-                    db_connection_info,
-                    schema_validation,
-                    constraint_validation,
-                    database_secret,
-                    explain_result,
-                    claude_analysis_result,  # Claude 분석 결과 추가
-                    dml_column_issues,  # DML 컬럼 이슈 추가
-                )
-                debug_log("HTML 보고서 생성 완료")
-            except Exception as html_error:
-                debug_log(f"HTML 보고서 생성 실패: {html_error}")
-                import traceback
-                debug_log(f"HTML 오류 상세: {traceback.format_exc()}")
+            await self.generate_html_report(
+                report_path,
+                filename,
+                ddl_content,
+                sql_type,
+                status,
+                summary,
+                issues,
+                db_connection_info,
+                schema_validation,
+                constraint_validation,
+                database_secret,
+                explain_result,
+                claude_analysis_result,  # Claude 분석 결과 추가
+            )
 
             # 공용 연결 정리 (Claude 검증 완료 후)
             debug_log("공용 연결 정리 시작")
@@ -1928,26 +1736,8 @@ class DBAssistantMCPServer:
         else:
             return "UNKNOWN"
 
-    def create_schema_validation_summary(self, issues: list, dml_column_issues: list) -> str:
-        """스키마 검증 결과를 요약하여 Claude에게 전달할 형태로 생성"""
-        if not issues and not dml_column_issues:
-            return "스키마 검증: 모든 검증 통과"
-        
-        summary_parts = []
-        if issues:
-            summary_parts.append(f"스키마 검증 문제점 ({len(issues)}개):")
-            for i, issue in enumerate(issues, 1):  # 모든 문제 표시
-                summary_parts.append(f"  {i}. {issue}")
-        
-        if dml_column_issues:
-            summary_parts.append(f"컬럼 검증 문제점 ({len(dml_column_issues)}개):")
-            for i, issue in enumerate(dml_column_issues, 1):  # 모든 문제 표시
-                summary_parts.append(f"  {i}. {issue}")
-        
-        return "\n".join(summary_parts)
-
     async def validate_with_claude(
-        self, ddl_content: str, database_secret: str = None, schema_info: dict = None, explain_info: str = None, sql_type: str = None, schema_validation_summary: str = None
+        self, ddl_content: str, database_secret: str = None, schema_info: dict = None, explain_info: str = None, sql_type: str = None
     ) -> str:
         """
         Claude cross-region 프로파일을 활용한 DDL 검증 (실제 스키마 정보 포함)
@@ -2100,21 +1890,6 @@ EXPLAIN 분석 결과:
 위 EXPLAIN 결과를 참고하여 성능상 문제가 있는지도 함께 분석해주세요.
 """
 
-        # 스키마 검증 결과 컨텍스트 추가
-        schema_validation_context = ""
-        schema_has_errors = False
-        if schema_validation_summary:
-            # 스키마 검증에서 오류가 있는지 확인
-            schema_has_errors = "오류" in schema_validation_summary or "실패" in schema_validation_summary or "존재하지 않" in schema_validation_summary or "이미 존재" in schema_validation_summary
-            
-            schema_validation_context = f"""
-기존 스키마 검증 결과:
-{schema_validation_summary}
-
-위 스키마 검증 결과를 참고하여 종합적인 판단을 해주세요.
-스키마 검증에서 문제가 발견된 경우, 해당 문제점들을 고려하여 검증해주세요.
-"""
-
         # Knowledge Base에서 관련 정보 조회
         knowledge_context = ""
         try:
@@ -2142,18 +1917,13 @@ Knowledge Base 참고 정보:
 
         {schema_context}
 
-        {schema_validation_context}
-
         {knowledge_context}
 
         **검증 기준:**
         Aurora MySQL 8.0에서 문법적으로 올바르고 실행 가능한지만 확인하세요.
 
-        **중요: 스키마 검증 실패 처리**
-        {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
-
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "DDL이 Aurora MySQL에서 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
+        1. DDL이 Aurora MySQL에서 실행 가능하면 반드시 "검증 통과"로 시작하세요
         2. 성능 개선이나 모범 사례는 "검증 통과 (권장사항: ...)"로 표시하세요  
         3. 실행을 막는 심각한 문법 오류만 "오류:"로 시작하세요
 
@@ -2173,8 +1943,6 @@ Knowledge Base 참고 정보:
 
         {explain_context}
 
-        {schema_validation_context}
-
         {knowledge_context}
 
         **검증 기준:**
@@ -2182,11 +1950,8 @@ Knowledge Base 참고 정보:
         2. 성능상 문제가 있는지 분석
         3. 인덱스 사용 효율성 검토
 
-        **중요: 스키마 검증 실패 처리**
-        {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
-
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "쿼리가 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
+        1. 쿼리가 실행 가능하면 반드시 "검증 통과"로 시작하세요
         2. 성능 개선점이 있으면 "검증 통과 (성능 권장사항: ...)"로 표시하세요
         3. 실행 불가능한 경우만 "오류:"로 시작하세요
 
@@ -2208,18 +1973,13 @@ Knowledge Base 참고 정보:
 
         {explain_context}
 
-        {schema_validation_context}
-
         {knowledge_context}
 
         **검증 기준:**
         Aurora MySQL 8.0에서 문법적으로 올바르고 실행 가능한지만 확인하세요.
 
-        **중요: 스키마 검증 실패 처리**
-        {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
-
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "SQL이 Aurora MySQL에서 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
+        1. SQL이 Aurora MySQL에서 실행 가능하면 반드시 "검증 통과"로 시작하세요
         2. 성능 개선이나 모범 사례는 "검증 통과 (권장사항: ...)"로 표시하세요  
         3. 실행을 막는 심각한 문법 오류만 "오류:"로 시작하세요
 
@@ -2643,7 +2403,6 @@ Knowledge Base 참고 정보:
     def validate_dml_columns(self, sql_content: str, cursor, debug_log) -> dict:
         """DML 쿼리의 컬럼 존재 여부 검증 - CREATE 구문 고려"""
         try:
-            debug_log("=== DML 컬럼 검증 시작 ===")
             if not sqlparse:
                 debug_log("sqlparse 모듈이 없어 DML 컬럼 검증을 건너뜁니다")
                 return {'total_queries': 0, 'queries_with_issues': 0, 'results': []}
@@ -2694,19 +2453,19 @@ Knowledge Base 참고 정보:
             
             # 각 쿼리별로 검증
             statements = sqlparse.split(cleaned_sql)
-            debug_log(f"총 {len(statements)}개의 구문으로 분리됨")
             
-            for i, stmt in enumerate(statements):
+            for stmt in statements:
                 if not stmt.strip():
                     continue
                 
                 stmt_lower = stmt.lower()
                 issues = []
-                debug_log(f"구문 {i+1} 검증 시작: {stmt_lower[:50]}...")
                 
                 # SELECT, UPDATE, DELETE 쿼리에서 컬럼 추출
                 if any(keyword in stmt_lower for keyword in ['select', 'update', 'delete']):
-                    debug_log(f"구문 {i+1}은 DML 쿼리입니다")
+                    # 테이블.컬럼 형태의 컬럼 참조 찾기
+                    column_refs = re.findall(r'(\w+)\.(\w+)', stmt_lower)
+                    
                     # FROM 절에서 테이블 추출
                     from_tables = re.findall(r'from\s+(\w+)(?:\s+(?:as\s+)?(\w+))?', stmt_lower)
                     join_tables = re.findall(r'join\s+(\w+)(?:\s+(?:as\s+)?(\w+))?', stmt_lower)
@@ -2720,24 +2479,18 @@ Knowledge Base 참고 정보:
                         if alias:
                             table_aliases[alias] = table
                     
-                    debug_log(f"구문 {i+1}에서 참조하는 테이블: {all_tables}")
-                    
                     # 새로 생성되는 테이블을 참조하는지 확인
                     references_new_table = any(table in created_tables for table in all_tables)
                     if references_new_table:
-                        debug_log(f"구문 {i+1}: 새로 생성되는 테이블을 참조하므로 DML 컬럼 검증 스킵: {[t for t in all_tables if t in created_tables]}")
+                        debug_log(f"쿼리가 새로 생성되는 테이블을 참조하므로 DML 컬럼 검증 스킵: {[t for t in all_tables if t in created_tables]}")
                         continue
-                    
-                    # 테이블.컬럼 형태의 컬럼 참조 찾기
-                    column_refs = re.findall(r'(\w+)\.(\w+)', stmt_lower)
-                    debug_log(f"구문 {i+1}에서 발견된 컬럼 참조: {column_refs}")
                     
                     # 컬럼 존재 여부 검증
                     for table_ref, column_name in column_refs:
                         # 실제 테이블명 해결
                         actual_table = table_aliases.get(table_ref, table_ref)
                         
-                        # 새로 생성되는 테이블이면 스킵 (이중 체크)
+                        # 새로 생성되는 테이블이면 스킵
                         if actual_table in created_tables:
                             debug_log(f"테이블 '{actual_table}'은 새로 생성되므로 컬럼 검증 스킵")
                             continue
@@ -2752,8 +2505,6 @@ Knowledge Base 참고 정보:
                                     'column': column_name,
                                     'message': f"컬럼 '{column_name}'이 테이블 '{actual_table}'에 존재하지 않습니다"
                                 })
-                else:
-                    debug_log(f"구문 {i+1}은 DML 쿼리가 아닙니다")
                 
                 if issues:
                     validation_results.append({
@@ -2761,7 +2512,6 @@ Knowledge Base 참고 정보:
                         'issues': issues
                     })
             
-            debug_log(f"=== DML 컬럼 검증 완료: {len(validation_results)}개 쿼리에서 이슈 발견 ===")
             return {
                 'total_queries': len([s for s in statements if s.strip()]),
                 'queries_with_issues': len(validation_results),
@@ -3251,6 +3001,20 @@ Knowledge Base 참고 정보:
 
         return result
 
+        result = {
+            "table": table_name,
+            "ddl_type": "DROP_INDEX",
+            "valid": len(issues) == 0,
+            "issues": issues,
+            "details": {"index_name": index_name, "table_exists": table_exists},
+        }  # test
+        debug_log(
+            f"DROP INDEX 검증 완료: issues={len(issues)}, valid={len(issues) == 0}"
+        )
+        debug_log(f"최종 결과: {result}")
+
+        return result
+
     async def validate_create_table_with_debug(
         self, cursor, ddl_statement: Dict[str, Any], debug_log
     ) -> Dict[str, Any]:
@@ -3424,6 +3188,72 @@ Knowledge Base 참고 정보:
         debug_log(f"최종 결과: {result}")
 
         return result
+        """DDL 구문 유형에 따른 스키마 검증"""
+        try:
+            print(f"[DEBUG] validate_schema 시작")
+            # DDL 구문 유형 및 상세 정보 파싱
+            ddl_info = self.parse_ddl_detailed(ddl_content)
+            print(f"[DEBUG] 파싱된 DDL 정보: {ddl_info}")
+
+            if not ddl_info:
+                print(f"[DEBUG] DDL 파싱 실패")
+                return {
+                    "success": False,
+                    "error": "DDL에서 구문 정보를 추출할 수 없습니다.",
+                }
+
+            connection, tunnel_used = await self.get_db_connection(
+                database_secret, self.selected_database, use_ssh_tunnel
+            )
+            cursor = connection.cursor()
+            print(f"[DEBUG] DB 연결 성공, 터널 사용: {tunnel_used}")
+
+            validation_results = []
+
+            # DDL 구문 유형별 검증
+            for ddl_statement in ddl_info:
+                ddl_type = ddl_statement["type"]
+                table_name = ddl_statement["table"]
+                print(f"[DEBUG] 검증 중: {ddl_type} on {table_name}")
+
+                if ddl_type == "CREATE_TABLE":
+                    result = await self.validate_create_table(cursor, ddl_statement)
+                elif ddl_type == "ALTER_TABLE":
+                    result = await self.validate_alter_table(cursor, ddl_statement)
+                elif ddl_type == "CREATE_INDEX":
+                    result = await self.validate_create_index(cursor, ddl_statement)
+                elif ddl_type == "DROP_TABLE":
+                    result = await self.validate_drop_table(cursor, ddl_statement)
+                elif ddl_type == "DROP_INDEX":
+                    print(f"[DEBUG] DROP_INDEX 검증 호출")
+                    result = await self.validate_drop_index(cursor, ddl_statement)
+                    print(f"[DEBUG] DROP_INDEX 검증 결과: {result}")
+                else:
+                    result = {
+                        "table": table_name,
+                        "ddl_type": ddl_type,
+                        "valid": False,
+                        "issues": [f"지원하지 않는 DDL 구문 유형: {ddl_type}"],
+                    }
+
+                validation_results.append(result)
+                print(f"[DEBUG] 검증 결과 추가됨: {result}")
+
+            cursor.close()
+            connection.close()
+
+            # SSH 터널 정리
+            if tunnel_used:
+                self.cleanup_ssh_tunnel()
+
+            print(f"[DEBUG] validate_schema 완료, 결과 개수: {len(validation_results)}")
+            return {"success": True, "validation_results": validation_results}
+
+        except Exception as e:
+            print(f"[DEBUG] validate_schema 예외: {e}")
+            if use_ssh_tunnel:
+                self.cleanup_ssh_tunnel()
+            return {"success": False, "error": f"스키마 검증 오류: {str(e)}"}
 
     async def validate_constraints(
         self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = True
@@ -4112,7 +3942,7 @@ Knowledge Base 참고 정보:
         report_path: Path,
         filename: str,
         ddl_content: str,
-        sql_type: str,
+        ddl_type: str,
         status: str,
         summary: str,
         issues: List[str],
@@ -4122,26 +3952,8 @@ Knowledge Base 참고 정보:
         database_secret: Optional[str],
         explain_result: Optional[Dict] = None,
         claude_analysis_result: Optional[str] = None,  # Claude 분석 결과 추가
-        dml_column_issues: List[str] = None,  # DML 컬럼 이슈 추가
     ):
         """HTML 보고서 생성"""
-        # dml_column_issues 초기화
-        if dml_column_issues is None:
-            dml_column_issues = []
-            
-        # 상세 디버그 로그 추가
-        try:
-            with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
-                f.write(f"=== HTML 생성 함수 시작 ===\n")
-                f.write(f"report_path: {report_path}\n")
-                f.write(f"filename: {filename}\n")
-                f.write(f"sql_type: {sql_type}\n")
-                f.write(f"status: {status}\n")
-                f.write(f"issues 개수: {len(issues)}\n")
-                f.flush()
-        except Exception as debug_e:
-            logger.error(f"디버그 로그 작성 오류: {debug_e}")
-            
         # 디버그 로그 추가
         try:
             with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
@@ -4150,15 +3962,7 @@ Knowledge Base 참고 정보:
         except:
             pass
         try:
-            # Claude 검증 결과를 기반으로 상태 재평가
-            claude_success = claude_analysis_result and claude_analysis_result.startswith("검증 통과")
-            
-            # 상태에 따른 색상 및 아이콘 - Claude 검증 결과 우선 반영
-            if claude_success and status == "FAIL" and not any("오류:" in issue or "실패" in issue or "존재하지 않" in issue for issue in issues):
-                # Claude가 성공이고 심각한 오류가 없으면 PASS로 변경
-                status = "PASS"
-                summary = "✅ 모든 검증을 통과했습니다."
-                
+            # 상태에 따른 색상 및 아이콘
             status_color = "#28a745" if status == "PASS" else "#dc3545"
             status_icon = "✅" if status == "PASS" else "❌"
 
@@ -4175,22 +3979,23 @@ Knowledge Base 참고 정보:
                 else:
                     other_issues.append(issue)
 
-            # 기타 검증 문제 섹션 제거 (중복 방지)
+            # 기타 검증 문제 섹션
+            other_issues_section = ""
+            if other_issues:
+                other_issues_section = """
+                <div class="issues-section">
+                    <h3>🚨 발견된 문제</h3>
+                    <ul class="issues-list">
+                """
+                for issue in other_issues:
+                    other_issues_section += f"<li>{issue}</li>"
+                other_issues_section += """
+                    </ul>
+                </div>
+                """
 
-            # Claude 검증 결과 내용 준비 (스키마 검증 결과 포함)
-            schema_validation_summary = self.create_schema_validation_summary(issues, dml_column_issues)
-            
-            # Claude 검증과 스키마 검증을 통합한 내용 생성
-            combined_validation_content = ""
-            
-            # Claude AI 검증 결과 추가 (스키마 검증 결과는 숨김)
+            # Claude 검증 결과 내용 준비
             claude_content = claude_analysis_result if claude_analysis_result else "Claude 검증 결과를 사용할 수 없습니다."
-            combined_validation_content += f"""
-<div class="validation-subsection">
-    <h4>📋 SQL검증결과</h4>
-    <pre class="validation-text">{claude_content}</pre>
-</div>
-"""
 
             # 전체 문제가 없는 경우
             success_section = ""
@@ -4208,7 +4013,7 @@ Knowledge Base 참고 정보:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SQL 검증보고서 - {filename}</title>
+    <title>DDL 검증 보고서 - {filename}</title>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -4326,7 +4131,7 @@ Knowledge Base 참고 정보:
             overflow-y: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
-            max-height: 300px;
+            max-height: none;
         }}
         .claude-section {{
             margin: 30px 0;
@@ -4368,38 +4173,6 @@ Knowledge Base 참고 정보:
             min-height: 100px;
             resize: vertical;  /* 사용자가 수직으로 크기 조절 가능 */
         }}
-        .validation-subsection {{
-            margin: 15px 0;
-            padding: 15px;
-            border-radius: 6px;
-            border-left: 4px solid #28a745;
-            background: #f8fff9;
-        }}
-        .validation-subsection h4 {{
-            margin: 0 0 10px 0;
-            color: #495057;
-            font-size: 1.1em;
-        }}
-        .validation-text {{
-            background: white;
-            border: 1px solid #e9ecef;
-            border-radius: 4px;
-            padding: 15px;
-            margin: 0;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            font-size: 13px;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            overflow-x: auto;
-            max-height: 300px;
-            overflow-y: auto;
-        }}
-        .success-text {{
-            color: #28a745;
-            font-weight: 500;
-            margin: 0;
-        }}
         .footer {{
             background: #f8f9fa;
             padding: 20px;
@@ -4423,7 +4196,7 @@ Knowledge Base 참고 정보:
 <body>
     <div class="container">
         <div class="header">
-            <h1>{status_icon} SQL 검증보고서</h1>
+            <h1>{status_icon} DDL 검증 보고서</h1>
             <div class="status-badge">{status}</div>
         </div>
         
@@ -4439,7 +4212,7 @@ Knowledge Base 참고 정보:
                 </div>
                 <div class="summary-item">
                     <h4>🔧 DDL 타입</h4>
-                    <p>{sql_type}</p>
+                    <p>{ddl_type}</p>
                 </div>
                 <div class="summary-item">
                     <h4>🗄️ 데이터베이스</h4>
@@ -4460,12 +4233,14 @@ Knowledge Base 참고 정보:
             </div>
             
             <div class="claude-section">
-                <h3>🔍 통합 검증 결과 (스키마 + 쿼리성능)</h3>
+                <h3>🤖 Claude AI 검증 결과</h3>
                 <div class="claude-result">
-                    {combined_validation_content}
+                    <pre class="claude-text">{claude_content}</pre>
                 </div>
             </div>
             
+            {other_issues_section}
+            {success_section}
         </div>
         
         <div class="footer">
@@ -4478,27 +4253,9 @@ Knowledge Base 참고 정보:
 
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write(report_content)
-                
-            # 파일 생성 확인 디버그
-            try:
-                with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
-                    f.write(f"HTML 파일 생성 완료: {report_path}\n")
-                    f.write(f"파일 존재 여부: {report_path.exists()}\n")
-                    f.flush()
-            except:
-                pass
 
         except Exception as e:
             logger.error(f"HTML 보고서 생성 오류: {e}")
-            # 상세 오류 정보를 디버그 파일에 기록
-            try:
-                with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write(f"HTML 생성 오류: {e}\n")
-                    f.write(f"상세 오류: {traceback.format_exc()}\n")
-                    f.flush()
-            except:
-                pass
 
     async def generate_consolidated_html_report(
         self, validation_results: List[Dict], database_secret: str
@@ -4544,7 +4301,7 @@ Knowledge Base 참고 정보:
                         <div class="sql-code">
 {result['ddl_content']}
                         </div>
-                        {f'<div class="issues-section">{issues_html}</div>' if result['issues'] else ''}
+                        {f'<div class="issues-section"><h4>🚨 발견된 문제</h4>{issues_html}</div>' if result['issues'] else ''}
                     </div>
                 </div>
                 """
@@ -4555,7 +4312,7 @@ Knowledge Base 참고 정보:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>통합 SQL 검증보고서</title>
+    <title>통합 DDL 검증 보고서</title>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -4657,7 +4414,7 @@ Knowledge Base 참고 정보:
             overflow-y: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
-            max-height: 300px;
+            max-height: none;
             font-size: 0.9em;
         }}
         .issues-section {{
@@ -4709,7 +4466,7 @@ Knowledge Base 참고 정보:
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 통합 SQL 검증보고서</h1>
+            <h1>📊 통합 DDL 검증 보고서</h1>
             <p>데이터베이스: {database_secret}</p>
             <p>검증 일시: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
         </div>
@@ -4756,57 +4513,103 @@ Knowledge Base 참고 정보:
     async def validate_all_sql_files(
         self, database_secret: Optional[str] = None
     ) -> str:
-        """모든 SQL 파일 검증 및 통합 보고서 생성 - validate_sql_file 사용"""
+        """모든 SQL 파일 검증 및 통합 보고서 생성 (최대 5개) - 연결 재사용"""
         try:
             sql_files = list(SQL_DIR.glob("*.sql"))
             if not sql_files:
                 return "sql 디렉토리에 SQL 파일이 없습니다."
 
-            # 모든 파일 처리
-            files_to_process = sql_files
-            logger.info(f"총 {len(sql_files)}개 SQL 파일을 검증합니다.")
+            # 최대 5개 파일만 처리
+            files_to_process = sql_files[:5]
+            if len(sql_files) > 5:
+                logger.warning(
+                    f"SQL 파일이 {len(sql_files)}개 있지만 처음 5개만 처리합니다."
+                )
+
+            # 공용 DB 연결 설정 (한 번만)
+            if database_secret:
+                logger.info("공용 DB 연결 설정 시작")
+                if not self.setup_shared_connection(
+                    database_secret, self.selected_database
+                ):
+                    return "❌ 데이터베이스 연결에 실패했습니다."
+                logger.info("공용 DB 연결 설정 완료")
 
             validation_results = []
             summary_results = []
 
-            # 각 파일을 validate_sql_file로 개별 검증
-            for sql_file in files_to_process:
-                try:
-                    # validate_sql_file 호출
-                    result = await self.validate_sql_file(sql_file.name, database_secret)
-                    
-                    # 결과 파싱 (간단한 성공/실패 판단)
-                    if "✅ 모든 검증을 통과했습니다" in result:
-                        status = "PASS"
+            try:
+                for sql_file in files_to_process:
+                    try:
+                        # 개별 파일 검증 (공용 연결 사용)
+                        ddl_content = sql_file.read_text(encoding="utf-8")
+                        ddl_type = self.detect_ddl_type(ddl_content)
+
+                        # 데이터베이스 연결 및 검증 (공용 커서 사용)
+                        db_connection_info = None
                         issues = []
-                        summary_results.append(f"**{sql_file.name}**: ✅ 통과")
-                    else:
-                        status = "FAIL"
-                        # 간단한 이슈 추출
-                        issues = ["검증 실패 - 상세 내용은 개별 보고서 참조"]
-                        summary_results.append(f"**{sql_file.name}**: ❌ 실패 (1개 문제)")
 
-                    # 파일 내용 읽기
-                    ddl_content = sql_file.read_text(encoding="utf-8")
-                    ddl_type = self.detect_ddl_type(ddl_content)
+                        if database_secret and self.shared_cursor:
+                            # 공용 커서로 검증 수행
+                            cursor = self.get_shared_cursor()
 
-                    validation_results.append({
-                        "filename": sql_file.name,
-                        "ddl_content": ddl_content,
-                        "ddl_type": ddl_type,
-                        "status": status,
-                        "issues": issues,
-                    })
+                            # 스키마 검증 (공용 커서 사용)
+                            schema_validation = await self.validate_schema_with_cursor(
+                                ddl_content, cursor
+                            )
+                            if schema_validation and not schema_validation.get(
+                                "valid", True
+                            ):
+                                issues.extend(schema_validation.get("issues", []))
 
-                except Exception as e:
-                    validation_results.append({
-                        "filename": sql_file.name,
-                        "ddl_content": f"파일 읽기 실패: {str(e)}",
-                        "ddl_type": "UNKNOWN",
-                        "status": "FAIL",
-                        "issues": [f"검증 실패: {str(e)}"],
-                    })
-                    summary_results.append(f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}")
+                            # 제약조건 검증 (공용 커서 사용)
+                            constraint_validation = (
+                                await self.validate_constraints_with_cursor(
+                                    ddl_content, cursor
+                                )
+                            )
+                            if constraint_validation and not constraint_validation.get(
+                                "valid", True
+                            ):
+                                issues.extend(constraint_validation.get("issues", []))
+
+                        status = "PASS" if not issues else "FAIL"
+
+                        # 결과 저장
+                        validation_results.append(
+                            {
+                                "filename": sql_file.name,
+                                "ddl_content": ddl_content,
+                                "ddl_type": ddl_type,
+                                "status": status,
+                                "issues": issues,
+                            }
+                        )
+
+                        summary_results.append(
+                            f"**{sql_file.name}**: {'✅ 통과' if status == 'PASS' else f'❌ 실패 ({len(issues)}개 문제)'}"
+                        )
+
+                    except Exception as e:
+                        validation_results.append(
+                            {
+                                "filename": sql_file.name,
+                                "ddl_content": f"파일 읽기 실패: {str(e)}",
+                                "ddl_type": "UNKNOWN",
+                                "status": "FAIL",
+                                "issues": [f"검증 실패: {str(e)}"],
+                            }
+                        )
+                        summary_results.append(
+                            f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}"
+                        )
+
+            finally:
+                # 공용 연결 정리 (모든 파일 검증 완료 후)
+                if database_secret:
+                    logger.info("공용 연결 정리 시작")
+                    self.cleanup_shared_connection()
+                    logger.info("공용 연결 정리 완료")
 
             # 통합 HTML 보고서 생성
             if validation_results:
@@ -4822,6 +4625,9 @@ Knowledge Base 참고 정보:
                 failed_files = total_files - passed_files
 
                 summary = f"📊 총 {total_files}개 파일 검증 완료"
+                if len(sql_files) > 5:
+                    summary += f" (전체 {len(sql_files)}개 중 5개 처리)"
+
                 summary += f"\n• 통과: {passed_files}개 ({round(passed_files/total_files*100)}%)"
                 summary += f"\n• 실패: {failed_files}개 ({round(failed_files/total_files*100)}%)"
                 summary += f"\n\n📄 통합 보고서가 저장되었습니다: {report_path}"
@@ -4829,9 +4635,6 @@ Knowledge Base 참고 정보:
                 return f"{summary}\n\n" + "\n".join(summary_results)
             else:
                 return "검증할 파일이 없습니다."
-
-        except Exception as e:
-            return f"전체 SQL 파일 검증 실패: {str(e)}"
 
         except Exception as e:
             # 예외 발생 시에도 연결 정리
@@ -5267,113 +5070,6 @@ Knowledge Base 참고 정보:
         except Exception as e:
             return f"메트릭 요약 정보 조회 중 오류 발생: {str(e)}"
 
-    def validate_column_type_compatibility(
-        self, existing_column: Dict[str, Any], new_definition: str, debug_log
-    ) -> Dict[str, Any]:
-        """컬럼 데이터 타입 호환성 검증"""
-        debug_log(
-            f"타입 호환성 검증 시작: 기존={existing_column['data_type']}, 새로운={new_definition}"
-        )
-
-        issues = []
-
-        # 새로운 데이터 타입 파싱
-        new_type_info = self.parse_data_type(new_definition.split()[0])
-        existing_type = existing_column["data_type"]
-
-        debug_log(f"파싱된 새 타입: {new_type_info}")
-
-        # 호환되지 않는 타입 변경 검사
-        incompatible_changes = [
-            # 문자열 -> 숫자
-            (
-                ["VARCHAR", "CHAR", "TEXT", "LONGTEXT", "MEDIUMTEXT"],
-                ["INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"],
-            ),
-            # 숫자 -> 문자열 (데이터 손실 가능)
-            (["INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"], ["VARCHAR", "CHAR"]),
-            # 날짜/시간 타입 변경
-            (["DATE", "DATETIME", "TIMESTAMP"], ["INT", "VARCHAR", "CHAR"]),
-        ]
-
-        for from_types, to_types in incompatible_changes:
-            if existing_type in from_types and new_type_info["type"] in to_types:
-                issues.append(
-                    f"데이터 타입을 {existing_type}에서 {new_type_info['type']}로 변경하는 것은 데이터 손실을 야기할 수 있습니다."
-                )
-                debug_log(f"호환성 문제: {existing_type} -> {new_type_info['type']}")
-
-        # 길이 축소 검사
-        if existing_type in ["VARCHAR", "CHAR"] and new_type_info["type"] in [
-            "VARCHAR",
-            "CHAR",
-        ]:
-            existing_length = existing_column["max_length"]
-            new_length = new_type_info["length"]
-
-            if existing_length and new_length and new_length < existing_length:
-                issues.append(
-                    f"컬럼 길이를 {existing_length}에서 {new_length}로 축소하는 것은 데이터 손실을 야기할 수 있습니다."
-                )
-                debug_log(f"길이 축소 문제: {existing_length} -> {new_length}")
-
-        # 정밀도 축소 검사 (DECIMAL)
-        if existing_type == "DECIMAL" and new_type_info["type"] == "DECIMAL":
-            existing_precision = existing_column["precision"]
-            existing_scale = existing_column["scale"]
-            new_precision = new_type_info["precision"]
-            new_scale = new_type_info["scale"]
-
-            if (
-                existing_precision
-                and new_precision
-                and new_precision < existing_precision
-            ) or (existing_scale and new_scale and new_scale < existing_scale):
-                issues.append(
-                    f"DECIMAL 정밀도를 ({existing_precision},{existing_scale})에서 ({new_precision},{new_scale})로 축소하는 것은 데이터 손실을 야기할 수 있습니다."
-                )
-                debug_log(
-                    f"정밀도 축소 문제: ({existing_precision},{existing_scale}) -> ({new_precision},{new_scale})"
-                )
-
-        result = {"compatible": len(issues) == 0, "issues": issues}
-
-        debug_log(
-            f"타입 호환성 검증 완료: compatible={result['compatible']}, issues={len(issues)}"
-        )
-        return result
-
-    def parse_data_type(self, data_type_str: str) -> Dict[str, Any]:
-        """데이터 타입 문자열을 파싱하여 타입과 길이 정보 추출"""
-        # VARCHAR(255), INT(11), DECIMAL(10,2) 등을 파싱
-        type_match = re.match(r"(\w+)(?:\(([^)]+)\))?", data_type_str.upper())
-        if not type_match:
-            return {
-                "type": data_type_str.upper(),
-                "length": None,
-                "precision": None,
-                "scale": None,
-            }
-
-        base_type = type_match.group(1)
-        params = type_match.group(2)
-
-        result = {"type": base_type, "length": None, "precision": None, "scale": None}
-
-        if params:
-            if "," in params:
-                # DECIMAL(10,2) 형태
-                parts = [p.strip() for p in params.split(",")]
-                result["precision"] = int(parts[0]) if parts[0].isdigit() else None
-                result["scale"] = (
-                    int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-                )
-            else:
-                # VARCHAR(255), INT(11) 형태
-                result["length"] = int(params) if params.isdigit() else None
-
-        return result
-
 
 # MCP 서버 설정
 server = Server("db-assistant-mcp-server")
@@ -5625,6 +5321,19 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="validate_all_sql",
+            description="sql 디렉토리의 SQL 파일들을 검증합니다 (최대 5개)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database_secret": {
+                        "type": "string",
+                        "description": "데이터베이스 시크릿 이름 (선택사항)",
+                    }
+                },
+            },
+        ),
+        types.Tool(
             name="copy_sql_to_directory",
             description="SQL 파일을 sql 디렉토리로 복사합니다",
             inputSchema={
@@ -5663,17 +5372,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "filename": {"type": "string", "description": "검증할 SQL 파일명"}
                 },
                 "required": ["database_secret", "filename"],
-            },
-        ),
-        types.Tool(
-            name="validate_all_sql",
-            description="모든 SQL 파일 일괄 검증",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "database_secret": {"type": "string", "description": "데이터베이스 시크릿 이름"}
-                },
-                "required": ["database_secret"],
             },
         ),
     ]
@@ -5742,6 +5440,10 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             result = await db_assistant.validate_sql_file(
                 arguments["filename"], arguments.get("database_secret")
             )
+        elif name == "validate_all_sql":
+            result = await db_assistant.validate_all_sql_files(
+                arguments.get("database_secret")
+            )
         elif name == "copy_sql_to_directory":
             result = await db_assistant.copy_sql_file(
                 arguments["source_path"], arguments.get("target_name")
@@ -5752,10 +5454,6 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             result = await db_assistant.test_individual_query_validation(
                 arguments["database_secret"], arguments["filename"]
             )
-        elif name == "validate_all_sql":
-            result = await db_assistant.validate_all_sql_files(
-                arguments["database_secret"]
-            )
         else:
             result = f"알 수 없는 도구: {name}"
 
@@ -5764,6 +5462,113 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
     except Exception as e:
         logger.error(f"도구 실행 오류: {e}")
         return [types.TextContent(type="text", text=f"오류: {str(e)}")]
+
+    def validate_column_type_compatibility(
+        self, existing_column: Dict[str, Any], new_definition: str, debug_log
+    ) -> Dict[str, Any]:
+        """컬럼 데이터 타입 호환성 검증"""
+        debug_log(
+            f"타입 호환성 검증 시작: 기존={existing_column['data_type']}, 새로운={new_definition}"
+        )
+
+        issues = []
+
+        # 새로운 데이터 타입 파싱
+        new_type_info = self.parse_data_type(new_definition.split()[0])
+        existing_type = existing_column["data_type"]
+
+        debug_log(f"파싱된 새 타입: {new_type_info}")
+
+        # 호환되지 않는 타입 변경 검사
+        incompatible_changes = [
+            # 문자열 -> 숫자
+            (
+                ["VARCHAR", "CHAR", "TEXT", "LONGTEXT", "MEDIUMTEXT"],
+                ["INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"],
+            ),
+            # 숫자 -> 문자열 (데이터 손실 가능)
+            (["INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"], ["VARCHAR", "CHAR"]),
+            # 날짜/시간 타입 변경
+            (["DATE", "DATETIME", "TIMESTAMP"], ["INT", "VARCHAR", "CHAR"]),
+        ]
+
+        for from_types, to_types in incompatible_changes:
+            if existing_type in from_types and new_type_info["type"] in to_types:
+                issues.append(
+                    f"데이터 타입을 {existing_type}에서 {new_type_info['type']}로 변경하는 것은 데이터 손실을 야기할 수 있습니다."
+                )
+                debug_log(f"호환성 문제: {existing_type} -> {new_type_info['type']}")
+
+        # 길이 축소 검사
+        if existing_type in ["VARCHAR", "CHAR"] and new_type_info["type"] in [
+            "VARCHAR",
+            "CHAR",
+        ]:
+            existing_length = existing_column["max_length"]
+            new_length = new_type_info["length"]
+
+            if existing_length and new_length and new_length < existing_length:
+                issues.append(
+                    f"컬럼 길이를 {existing_length}에서 {new_length}로 축소하는 것은 데이터 손실을 야기할 수 있습니다."
+                )
+                debug_log(f"길이 축소 문제: {existing_length} -> {new_length}")
+
+        # 정밀도 축소 검사 (DECIMAL)
+        if existing_type == "DECIMAL" and new_type_info["type"] == "DECIMAL":
+            existing_precision = existing_column["precision"]
+            existing_scale = existing_column["scale"]
+            new_precision = new_type_info["precision"]
+            new_scale = new_type_info["scale"]
+
+            if (
+                existing_precision
+                and new_precision
+                and new_precision < existing_precision
+            ) or (existing_scale and new_scale and new_scale < existing_scale):
+                issues.append(
+                    f"DECIMAL 정밀도를 ({existing_precision},{existing_scale})에서 ({new_precision},{new_scale})로 축소하는 것은 데이터 손실을 야기할 수 있습니다."
+                )
+                debug_log(
+                    f"정밀도 축소 문제: ({existing_precision},{existing_scale}) -> ({new_precision},{new_scale})"
+                )
+
+        result = {"compatible": len(issues) == 0, "issues": issues}
+
+        debug_log(
+            f"타입 호환성 검증 완료: compatible={result['compatible']}, issues={len(issues)}"
+        )
+        return result
+
+    def parse_data_type(self, data_type_str: str) -> Dict[str, Any]:
+        """데이터 타입 문자열을 파싱하여 타입과 길이 정보 추출"""
+        # VARCHAR(255), INT(11), DECIMAL(10,2) 등을 파싱
+        type_match = re.match(r"(\w+)(?:\(([^)]+)\))?", data_type_str.upper())
+        if not type_match:
+            return {
+                "type": data_type_str.upper(),
+                "length": None,
+                "precision": None,
+                "scale": None,
+            }
+
+        base_type = type_match.group(1)
+        params = type_match.group(2)
+
+        result = {"type": base_type, "length": None, "precision": None, "scale": None}
+
+        if params:
+            if "," in params:
+                # DECIMAL(10,2) 형태
+                parts = [p.strip() for p in params.split(",")]
+                result["precision"] = int(parts[0]) if parts[0].isdigit() else None
+                result["scale"] = (
+                    int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                )
+            else:
+                # VARCHAR(255), INT(11) 형태
+                result["length"] = int(params) if params.isdigit() else None
+
+        return result
 
 
 async def main():

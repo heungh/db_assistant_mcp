@@ -721,31 +721,6 @@ class DBAssistantMCPServer:
         
         return list(cte_tables)
 
-    def extract_foreign_keys(self, ddl_content: str) -> List[Dict[str, str]]:
-        """DDL에서 외래키 정보 추출"""
-        foreign_keys = []
-        
-        # 주석 제거
-        ddl_clean = re.sub(r"--.*$", "", ddl_content, flags=re.MULTILINE)
-        ddl_clean = re.sub(r"/\*.*?\*/", "", ddl_clean, flags=re.DOTALL)
-        
-        # FOREIGN KEY 패턴 매칭
-        fk_pattern = r"FOREIGN\s+KEY\s*\(\s*([^)]+)\s*\)\s*REFERENCES\s+([^\s(]+)\s*\(\s*([^)]+)\s*\)"
-        matches = re.finditer(fk_pattern, ddl_clean, re.IGNORECASE)
-        
-        for match in matches:
-            column = match.group(1).strip().strip('`')
-            ref_table = match.group(2).strip().strip('`')
-            ref_column = match.group(3).strip().strip('`')
-            
-            foreign_keys.append({
-                "column": column,
-                "referenced_table": ref_table,
-                "referenced_column": ref_column
-            })
-        
-        return foreign_keys
-
     def extract_table_names(self, sql_content: str) -> List[str]:
         """SQL에서 테이블명 추출 (WITH절 CTE 테이블 제외)"""
         tables = set()
@@ -1562,9 +1537,6 @@ class DBAssistantMCPServer:
             constraint_validation = None
             explain_result = None
 
-            # 변수 초기화
-            dml_column_issues = []
-            
             # 1. 기본 문법 검증 - 개선된 세미콜론 검증
             semicolon_valid = self.validate_semicolon_usage(ddl_content)
             if not semicolon_valid:
@@ -1710,12 +1682,8 @@ class DBAssistantMCPServer:
                     except Exception as e:
                         debug_log(f"스키마 정보 추출 실패: {e}")
 
-                # 스키마 검증 결과 요약 생성
-                schema_validation_summary = self.create_schema_validation_summary(issues, dml_column_issues)
-                debug_log(f"스키마 검증 요약 생성: {schema_validation_summary}")
-
                 claude_result = await self.validate_with_claude(
-                    ddl_content, database_secret, relevant_schema_info, explain_info_str, sql_type, schema_validation_summary
+                    ddl_content, database_secret, relevant_schema_info, explain_info_str, sql_type
                 )
                 debug_log(f"Claude 검증 결과: {claude_result}")
                 debug_log(f"스키마 정보 전달됨: {relevant_schema_info is not None}")
@@ -1749,15 +1717,8 @@ class DBAssistantMCPServer:
             debug_log(f"최종 이슈 개수: {len(issues)}")
             debug_log(f"이슈 목록: {issues}")
 
-            # Claude 검증 결과를 기반으로 최종 상태 결정
-            claude_success = claude_analysis_result and claude_analysis_result.startswith("검증 통과")
-            
-            # 결과 생성 - Claude 검증이 성공이면 우선적으로 PASS 처리
-            if claude_success and not any("오류:" in issue or "실패" in issue or "존재하지 않" in issue for issue in issues):
-                summary = "✅ 모든 검증을 통과했습니다."
-                status = "PASS"
-                debug_log("Claude 검증 성공으로 최종 상태를 PASS로 설정")
-            elif not issues:
+            # 결과 생성
+            if not issues:
                 summary = "✅ 모든 검증을 통과했습니다."
                 status = "PASS"
             else:
@@ -1772,30 +1733,21 @@ class DBAssistantMCPServer:
 
             # HTML 보고서 생성
             debug_log("HTML 보고서 생성 시작")
-            debug_log(f"dml_column_issues 값: {dml_column_issues}")
-            debug_log(f"report_path 값: {report_path}")
-            try:
-                await self.generate_html_report(
-                    report_path,
-                    filename,
-                    ddl_content,
-                    sql_type,
-                    status,
-                    summary,
-                    issues,
-                    db_connection_info,
-                    schema_validation,
-                    constraint_validation,
-                    database_secret,
-                    explain_result,
-                    claude_analysis_result,  # Claude 분석 결과 추가
-                    dml_column_issues,  # DML 컬럼 이슈 추가
-                )
-                debug_log("HTML 보고서 생성 완료")
-            except Exception as html_error:
-                debug_log(f"HTML 보고서 생성 실패: {html_error}")
-                import traceback
-                debug_log(f"HTML 오류 상세: {traceback.format_exc()}")
+            await self.generate_html_report(
+                report_path,
+                filename,
+                ddl_content,
+                sql_type,
+                status,
+                summary,
+                issues,
+                db_connection_info,
+                schema_validation,
+                constraint_validation,
+                database_secret,
+                explain_result,
+                claude_analysis_result,  # Claude 분석 결과 추가
+            )
 
             # 공용 연결 정리 (Claude 검증 완료 후)
             debug_log("공용 연결 정리 시작")
@@ -1928,26 +1880,8 @@ class DBAssistantMCPServer:
         else:
             return "UNKNOWN"
 
-    def create_schema_validation_summary(self, issues: list, dml_column_issues: list) -> str:
-        """스키마 검증 결과를 요약하여 Claude에게 전달할 형태로 생성"""
-        if not issues and not dml_column_issues:
-            return "스키마 검증: 모든 검증 통과"
-        
-        summary_parts = []
-        if issues:
-            summary_parts.append(f"스키마 검증 문제점 ({len(issues)}개):")
-            for i, issue in enumerate(issues, 1):  # 모든 문제 표시
-                summary_parts.append(f"  {i}. {issue}")
-        
-        if dml_column_issues:
-            summary_parts.append(f"컬럼 검증 문제점 ({len(dml_column_issues)}개):")
-            for i, issue in enumerate(dml_column_issues, 1):  # 모든 문제 표시
-                summary_parts.append(f"  {i}. {issue}")
-        
-        return "\n".join(summary_parts)
-
     async def validate_with_claude(
-        self, ddl_content: str, database_secret: str = None, schema_info: dict = None, explain_info: str = None, sql_type: str = None, schema_validation_summary: str = None
+        self, ddl_content: str, database_secret: str = None, schema_info: dict = None, explain_info: str = None, sql_type: str = None
     ) -> str:
         """
         Claude cross-region 프로파일을 활용한 DDL 검증 (실제 스키마 정보 포함)
@@ -2100,21 +2034,6 @@ EXPLAIN 분석 결과:
 위 EXPLAIN 결과를 참고하여 성능상 문제가 있는지도 함께 분석해주세요.
 """
 
-        # 스키마 검증 결과 컨텍스트 추가
-        schema_validation_context = ""
-        schema_has_errors = False
-        if schema_validation_summary:
-            # 스키마 검증에서 오류가 있는지 확인
-            schema_has_errors = "오류" in schema_validation_summary or "실패" in schema_validation_summary or "존재하지 않" in schema_validation_summary or "이미 존재" in schema_validation_summary
-            
-            schema_validation_context = f"""
-기존 스키마 검증 결과:
-{schema_validation_summary}
-
-위 스키마 검증 결과를 참고하여 종합적인 판단을 해주세요.
-스키마 검증에서 문제가 발견된 경우, 해당 문제점들을 고려하여 검증해주세요.
-"""
-
         # Knowledge Base에서 관련 정보 조회
         knowledge_context = ""
         try:
@@ -2142,18 +2061,13 @@ Knowledge Base 참고 정보:
 
         {schema_context}
 
-        {schema_validation_context}
-
         {knowledge_context}
 
         **검증 기준:**
         Aurora MySQL 8.0에서 문법적으로 올바르고 실행 가능한지만 확인하세요.
 
-        **중요: 스키마 검증 실패 처리**
-        {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
-
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "DDL이 Aurora MySQL에서 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
+        1. DDL이 Aurora MySQL에서 실행 가능하면 반드시 "검증 통과"로 시작하세요
         2. 성능 개선이나 모범 사례는 "검증 통과 (권장사항: ...)"로 표시하세요  
         3. 실행을 막는 심각한 문법 오류만 "오류:"로 시작하세요
 
@@ -2173,8 +2087,6 @@ Knowledge Base 참고 정보:
 
         {explain_context}
 
-        {schema_validation_context}
-
         {knowledge_context}
 
         **검증 기준:**
@@ -2182,11 +2094,8 @@ Knowledge Base 참고 정보:
         2. 성능상 문제가 있는지 분석
         3. 인덱스 사용 효율성 검토
 
-        **중요: 스키마 검증 실패 처리**
-        {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
-
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "쿼리가 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
+        1. 쿼리가 실행 가능하면 반드시 "검증 통과"로 시작하세요
         2. 성능 개선점이 있으면 "검증 통과 (성능 권장사항: ...)"로 표시하세요
         3. 실행 불가능한 경우만 "오류:"로 시작하세요
 
@@ -2208,18 +2117,13 @@ Knowledge Base 참고 정보:
 
         {explain_context}
 
-        {schema_validation_context}
-
         {knowledge_context}
 
         **검증 기준:**
         Aurora MySQL 8.0에서 문법적으로 올바르고 실행 가능한지만 확인하세요.
 
-        **중요: 스키마 검증 실패 처리**
-        {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
-
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "SQL이 Aurora MySQL에서 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
+        1. SQL이 Aurora MySQL에서 실행 가능하면 반드시 "검증 통과"로 시작하세요
         2. 성능 개선이나 모범 사례는 "검증 통과 (권장사항: ...)"로 표시하세요  
         3. 실행을 막는 심각한 문법 오류만 "오류:"로 시작하세요
 
@@ -4112,7 +4016,7 @@ Knowledge Base 참고 정보:
         report_path: Path,
         filename: str,
         ddl_content: str,
-        sql_type: str,
+        ddl_type: str,
         status: str,
         summary: str,
         issues: List[str],
@@ -4122,26 +4026,8 @@ Knowledge Base 참고 정보:
         database_secret: Optional[str],
         explain_result: Optional[Dict] = None,
         claude_analysis_result: Optional[str] = None,  # Claude 분석 결과 추가
-        dml_column_issues: List[str] = None,  # DML 컬럼 이슈 추가
     ):
         """HTML 보고서 생성"""
-        # dml_column_issues 초기화
-        if dml_column_issues is None:
-            dml_column_issues = []
-            
-        # 상세 디버그 로그 추가
-        try:
-            with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
-                f.write(f"=== HTML 생성 함수 시작 ===\n")
-                f.write(f"report_path: {report_path}\n")
-                f.write(f"filename: {filename}\n")
-                f.write(f"sql_type: {sql_type}\n")
-                f.write(f"status: {status}\n")
-                f.write(f"issues 개수: {len(issues)}\n")
-                f.flush()
-        except Exception as debug_e:
-            logger.error(f"디버그 로그 작성 오류: {debug_e}")
-            
         # 디버그 로그 추가
         try:
             with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
@@ -4150,15 +4036,7 @@ Knowledge Base 참고 정보:
         except:
             pass
         try:
-            # Claude 검증 결과를 기반으로 상태 재평가
-            claude_success = claude_analysis_result and claude_analysis_result.startswith("검증 통과")
-            
-            # 상태에 따른 색상 및 아이콘 - Claude 검증 결과 우선 반영
-            if claude_success and status == "FAIL" and not any("오류:" in issue or "실패" in issue or "존재하지 않" in issue for issue in issues):
-                # Claude가 성공이고 심각한 오류가 없으면 PASS로 변경
-                status = "PASS"
-                summary = "✅ 모든 검증을 통과했습니다."
-                
+            # 상태에 따른 색상 및 아이콘
             status_color = "#28a745" if status == "PASS" else "#dc3545"
             status_icon = "✅" if status == "PASS" else "❌"
 
@@ -4175,22 +4053,23 @@ Knowledge Base 참고 정보:
                 else:
                     other_issues.append(issue)
 
-            # 기타 검증 문제 섹션 제거 (중복 방지)
+            # 기타 검증 문제 섹션
+            other_issues_section = ""
+            if other_issues:
+                other_issues_section = """
+                <div class="issues-section">
+                    <h3>🚨 발견된 문제</h3>
+                    <ul class="issues-list">
+                """
+                for issue in other_issues:
+                    other_issues_section += f"<li>{issue}</li>"
+                other_issues_section += """
+                    </ul>
+                </div>
+                """
 
-            # Claude 검증 결과 내용 준비 (스키마 검증 결과 포함)
-            schema_validation_summary = self.create_schema_validation_summary(issues, dml_column_issues)
-            
-            # Claude 검증과 스키마 검증을 통합한 내용 생성
-            combined_validation_content = ""
-            
-            # Claude AI 검증 결과 추가 (스키마 검증 결과는 숨김)
+            # Claude 검증 결과 내용 준비
             claude_content = claude_analysis_result if claude_analysis_result else "Claude 검증 결과를 사용할 수 없습니다."
-            combined_validation_content += f"""
-<div class="validation-subsection">
-    <h4>📋 SQL검증결과</h4>
-    <pre class="validation-text">{claude_content}</pre>
-</div>
-"""
 
             # 전체 문제가 없는 경우
             success_section = ""
@@ -4208,7 +4087,7 @@ Knowledge Base 참고 정보:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SQL 검증보고서 - {filename}</title>
+    <title>DDL 검증 보고서 - {filename}</title>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -4326,7 +4205,7 @@ Knowledge Base 참고 정보:
             overflow-y: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
-            max-height: 300px;
+            max-height: none;
         }}
         .claude-section {{
             margin: 30px 0;
@@ -4368,38 +4247,6 @@ Knowledge Base 참고 정보:
             min-height: 100px;
             resize: vertical;  /* 사용자가 수직으로 크기 조절 가능 */
         }}
-        .validation-subsection {{
-            margin: 15px 0;
-            padding: 15px;
-            border-radius: 6px;
-            border-left: 4px solid #28a745;
-            background: #f8fff9;
-        }}
-        .validation-subsection h4 {{
-            margin: 0 0 10px 0;
-            color: #495057;
-            font-size: 1.1em;
-        }}
-        .validation-text {{
-            background: white;
-            border: 1px solid #e9ecef;
-            border-radius: 4px;
-            padding: 15px;
-            margin: 0;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            font-size: 13px;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            overflow-x: auto;
-            max-height: 300px;
-            overflow-y: auto;
-        }}
-        .success-text {{
-            color: #28a745;
-            font-weight: 500;
-            margin: 0;
-        }}
         .footer {{
             background: #f8f9fa;
             padding: 20px;
@@ -4423,7 +4270,7 @@ Knowledge Base 참고 정보:
 <body>
     <div class="container">
         <div class="header">
-            <h1>{status_icon} SQL 검증보고서</h1>
+            <h1>{status_icon} DDL 검증 보고서</h1>
             <div class="status-badge">{status}</div>
         </div>
         
@@ -4439,7 +4286,7 @@ Knowledge Base 참고 정보:
                 </div>
                 <div class="summary-item">
                     <h4>🔧 DDL 타입</h4>
-                    <p>{sql_type}</p>
+                    <p>{ddl_type}</p>
                 </div>
                 <div class="summary-item">
                     <h4>🗄️ 데이터베이스</h4>
@@ -4460,12 +4307,14 @@ Knowledge Base 참고 정보:
             </div>
             
             <div class="claude-section">
-                <h3>🔍 통합 검증 결과 (스키마 + 쿼리성능)</h3>
+                <h3>🤖 Claude AI 검증 결과</h3>
                 <div class="claude-result">
-                    {combined_validation_content}
+                    <pre class="claude-text">{claude_content}</pre>
                 </div>
             </div>
             
+            {other_issues_section}
+            {success_section}
         </div>
         
         <div class="footer">
@@ -4478,27 +4327,9 @@ Knowledge Base 참고 정보:
 
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write(report_content)
-                
-            # 파일 생성 확인 디버그
-            try:
-                with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
-                    f.write(f"HTML 파일 생성 완료: {report_path}\n")
-                    f.write(f"파일 존재 여부: {report_path.exists()}\n")
-                    f.flush()
-            except:
-                pass
 
         except Exception as e:
             logger.error(f"HTML 보고서 생성 오류: {e}")
-            # 상세 오류 정보를 디버그 파일에 기록
-            try:
-                with open("/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt", "a", encoding="utf-8") as f:
-                    import traceback
-                    f.write(f"HTML 생성 오류: {e}\n")
-                    f.write(f"상세 오류: {traceback.format_exc()}\n")
-                    f.flush()
-            except:
-                pass
 
     async def generate_consolidated_html_report(
         self, validation_results: List[Dict], database_secret: str
@@ -4544,7 +4375,7 @@ Knowledge Base 참고 정보:
                         <div class="sql-code">
 {result['ddl_content']}
                         </div>
-                        {f'<div class="issues-section">{issues_html}</div>' if result['issues'] else ''}
+                        {f'<div class="issues-section"><h4>🚨 발견된 문제</h4>{issues_html}</div>' if result['issues'] else ''}
                     </div>
                 </div>
                 """
@@ -4555,7 +4386,7 @@ Knowledge Base 참고 정보:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>통합 SQL 검증보고서</title>
+    <title>통합 DDL 검증 보고서</title>
     <style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -4657,7 +4488,7 @@ Knowledge Base 참고 정보:
             overflow-y: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
-            max-height: 300px;
+            max-height: none;
             font-size: 0.9em;
         }}
         .issues-section {{
@@ -4709,7 +4540,7 @@ Knowledge Base 참고 정보:
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 통합 SQL 검증보고서</h1>
+            <h1>📊 통합 DDL 검증 보고서</h1>
             <p>데이터베이스: {database_secret}</p>
             <p>검증 일시: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
         </div>
@@ -4756,57 +4587,103 @@ Knowledge Base 참고 정보:
     async def validate_all_sql_files(
         self, database_secret: Optional[str] = None
     ) -> str:
-        """모든 SQL 파일 검증 및 통합 보고서 생성 - validate_sql_file 사용"""
+        """모든 SQL 파일 검증 및 통합 보고서 생성 (최대 5개) - 연결 재사용"""
         try:
             sql_files = list(SQL_DIR.glob("*.sql"))
             if not sql_files:
                 return "sql 디렉토리에 SQL 파일이 없습니다."
 
-            # 모든 파일 처리
-            files_to_process = sql_files
-            logger.info(f"총 {len(sql_files)}개 SQL 파일을 검증합니다.")
+            # 최대 5개 파일만 처리
+            files_to_process = sql_files[:5]
+            if len(sql_files) > 5:
+                logger.warning(
+                    f"SQL 파일이 {len(sql_files)}개 있지만 처음 5개만 처리합니다."
+                )
+
+            # 공용 DB 연결 설정 (한 번만)
+            if database_secret:
+                logger.info("공용 DB 연결 설정 시작")
+                if not self.setup_shared_connection(
+                    database_secret, self.selected_database
+                ):
+                    return "❌ 데이터베이스 연결에 실패했습니다."
+                logger.info("공용 DB 연결 설정 완료")
 
             validation_results = []
             summary_results = []
 
-            # 각 파일을 validate_sql_file로 개별 검증
-            for sql_file in files_to_process:
-                try:
-                    # validate_sql_file 호출
-                    result = await self.validate_sql_file(sql_file.name, database_secret)
-                    
-                    # 결과 파싱 (간단한 성공/실패 판단)
-                    if "✅ 모든 검증을 통과했습니다" in result:
-                        status = "PASS"
+            try:
+                for sql_file in files_to_process:
+                    try:
+                        # 개별 파일 검증 (공용 연결 사용)
+                        ddl_content = sql_file.read_text(encoding="utf-8")
+                        ddl_type = self.detect_ddl_type(ddl_content)
+
+                        # 데이터베이스 연결 및 검증 (공용 커서 사용)
+                        db_connection_info = None
                         issues = []
-                        summary_results.append(f"**{sql_file.name}**: ✅ 통과")
-                    else:
-                        status = "FAIL"
-                        # 간단한 이슈 추출
-                        issues = ["검증 실패 - 상세 내용은 개별 보고서 참조"]
-                        summary_results.append(f"**{sql_file.name}**: ❌ 실패 (1개 문제)")
 
-                    # 파일 내용 읽기
-                    ddl_content = sql_file.read_text(encoding="utf-8")
-                    ddl_type = self.detect_ddl_type(ddl_content)
+                        if database_secret and self.shared_cursor:
+                            # 공용 커서로 검증 수행
+                            cursor = self.get_shared_cursor()
 
-                    validation_results.append({
-                        "filename": sql_file.name,
-                        "ddl_content": ddl_content,
-                        "ddl_type": ddl_type,
-                        "status": status,
-                        "issues": issues,
-                    })
+                            # 스키마 검증 (공용 커서 사용)
+                            schema_validation = await self.validate_schema_with_cursor(
+                                ddl_content, cursor
+                            )
+                            if schema_validation and not schema_validation.get(
+                                "valid", True
+                            ):
+                                issues.extend(schema_validation.get("issues", []))
 
-                except Exception as e:
-                    validation_results.append({
-                        "filename": sql_file.name,
-                        "ddl_content": f"파일 읽기 실패: {str(e)}",
-                        "ddl_type": "UNKNOWN",
-                        "status": "FAIL",
-                        "issues": [f"검증 실패: {str(e)}"],
-                    })
-                    summary_results.append(f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}")
+                            # 제약조건 검증 (공용 커서 사용)
+                            constraint_validation = (
+                                await self.validate_constraints_with_cursor(
+                                    ddl_content, cursor
+                                )
+                            )
+                            if constraint_validation and not constraint_validation.get(
+                                "valid", True
+                            ):
+                                issues.extend(constraint_validation.get("issues", []))
+
+                        status = "PASS" if not issues else "FAIL"
+
+                        # 결과 저장
+                        validation_results.append(
+                            {
+                                "filename": sql_file.name,
+                                "ddl_content": ddl_content,
+                                "ddl_type": ddl_type,
+                                "status": status,
+                                "issues": issues,
+                            }
+                        )
+
+                        summary_results.append(
+                            f"**{sql_file.name}**: {'✅ 통과' if status == 'PASS' else f'❌ 실패 ({len(issues)}개 문제)'}"
+                        )
+
+                    except Exception as e:
+                        validation_results.append(
+                            {
+                                "filename": sql_file.name,
+                                "ddl_content": f"파일 읽기 실패: {str(e)}",
+                                "ddl_type": "UNKNOWN",
+                                "status": "FAIL",
+                                "issues": [f"검증 실패: {str(e)}"],
+                            }
+                        )
+                        summary_results.append(
+                            f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}"
+                        )
+
+            finally:
+                # 공용 연결 정리 (모든 파일 검증 완료 후)
+                if database_secret:
+                    logger.info("공용 연결 정리 시작")
+                    self.cleanup_shared_connection()
+                    logger.info("공용 연결 정리 완료")
 
             # 통합 HTML 보고서 생성
             if validation_results:
@@ -4822,6 +4699,9 @@ Knowledge Base 참고 정보:
                 failed_files = total_files - passed_files
 
                 summary = f"📊 총 {total_files}개 파일 검증 완료"
+                if len(sql_files) > 5:
+                    summary += f" (전체 {len(sql_files)}개 중 5개 처리)"
+
                 summary += f"\n• 통과: {passed_files}개 ({round(passed_files/total_files*100)}%)"
                 summary += f"\n• 실패: {failed_files}개 ({round(failed_files/total_files*100)}%)"
                 summary += f"\n\n📄 통합 보고서가 저장되었습니다: {report_path}"
@@ -4829,9 +4709,6 @@ Knowledge Base 참고 정보:
                 return f"{summary}\n\n" + "\n".join(summary_results)
             else:
                 return "검증할 파일이 없습니다."
-
-        except Exception as e:
-            return f"전체 SQL 파일 검증 실패: {str(e)}"
 
         except Exception as e:
             # 예외 발생 시에도 연결 정리
@@ -5625,6 +5502,19 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="validate_all_sql",
+            description="sql 디렉토리의 SQL 파일들을 검증합니다 (최대 5개)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database_secret": {
+                        "type": "string",
+                        "description": "데이터베이스 시크릿 이름 (선택사항)",
+                    }
+                },
+            },
+        ),
+        types.Tool(
             name="copy_sql_to_directory",
             description="SQL 파일을 sql 디렉토리로 복사합니다",
             inputSchema={
@@ -5663,17 +5553,6 @@ async def handle_list_tools() -> list[types.Tool]:
                     "filename": {"type": "string", "description": "검증할 SQL 파일명"}
                 },
                 "required": ["database_secret", "filename"],
-            },
-        ),
-        types.Tool(
-            name="validate_all_sql",
-            description="모든 SQL 파일 일괄 검증",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "database_secret": {"type": "string", "description": "데이터베이스 시크릿 이름"}
-                },
-                "required": ["database_secret"],
             },
         ),
     ]
@@ -5742,6 +5621,10 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             result = await db_assistant.validate_sql_file(
                 arguments["filename"], arguments.get("database_secret")
             )
+        elif name == "validate_all_sql":
+            result = await db_assistant.validate_all_sql_files(
+                arguments.get("database_secret")
+            )
         elif name == "copy_sql_to_directory":
             result = await db_assistant.copy_sql_file(
                 arguments["source_path"], arguments.get("target_name")
@@ -5751,10 +5634,6 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         elif name == "test_individual_query_validation":
             result = await db_assistant.test_individual_query_validation(
                 arguments["database_secret"], arguments["filename"]
-            )
-        elif name == "validate_all_sql":
-            result = await db_assistant.validate_all_sql_files(
-                arguments["database_secret"]
             )
         else:
             result = f"알 수 없는 도구: {name}"

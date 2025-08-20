@@ -1749,15 +1749,8 @@ class DBAssistantMCPServer:
             debug_log(f"최종 이슈 개수: {len(issues)}")
             debug_log(f"이슈 목록: {issues}")
 
-            # Claude 검증 결과를 기반으로 최종 상태 결정
-            claude_success = claude_analysis_result and claude_analysis_result.startswith("검증 통과")
-            
-            # 결과 생성 - Claude 검증이 성공이면 우선적으로 PASS 처리
-            if claude_success and not any("오류:" in issue or "실패" in issue or "존재하지 않" in issue for issue in issues):
-                summary = "✅ 모든 검증을 통과했습니다."
-                status = "PASS"
-                debug_log("Claude 검증 성공으로 최종 상태를 PASS로 설정")
-            elif not issues:
+            # 결과 생성
+            if not issues:
                 summary = "✅ 모든 검증을 통과했습니다."
                 status = "PASS"
             else:
@@ -4150,15 +4143,7 @@ Knowledge Base 참고 정보:
         except:
             pass
         try:
-            # Claude 검증 결과를 기반으로 상태 재평가
-            claude_success = claude_analysis_result and claude_analysis_result.startswith("검증 통과")
-            
-            # 상태에 따른 색상 및 아이콘 - Claude 검증 결과 우선 반영
-            if claude_success and status == "FAIL" and not any("오류:" in issue or "실패" in issue or "존재하지 않" in issue for issue in issues):
-                # Claude가 성공이고 심각한 오류가 없으면 PASS로 변경
-                status = "PASS"
-                summary = "✅ 모든 검증을 통과했습니다."
-                
+            # 상태에 따른 색상 및 아이콘
             status_color = "#28a745" if status == "PASS" else "#dc3545"
             status_icon = "✅" if status == "PASS" else "❌"
 
@@ -4756,57 +4741,103 @@ Knowledge Base 참고 정보:
     async def validate_all_sql_files(
         self, database_secret: Optional[str] = None
     ) -> str:
-        """모든 SQL 파일 검증 및 통합 보고서 생성 - validate_sql_file 사용"""
+        """모든 SQL 파일 검증 및 통합 보고서 생성 (최대 5개) - 연결 재사용"""
         try:
             sql_files = list(SQL_DIR.glob("*.sql"))
             if not sql_files:
                 return "sql 디렉토리에 SQL 파일이 없습니다."
 
-            # 모든 파일 처리
-            files_to_process = sql_files
-            logger.info(f"총 {len(sql_files)}개 SQL 파일을 검증합니다.")
+            # 최대 5개 파일만 처리
+            files_to_process = sql_files[:5]
+            if len(sql_files) > 5:
+                logger.warning(
+                    f"SQL 파일이 {len(sql_files)}개 있지만 처음 5개만 처리합니다."
+                )
+
+            # 공용 DB 연결 설정 (한 번만)
+            if database_secret:
+                logger.info("공용 DB 연결 설정 시작")
+                if not self.setup_shared_connection(
+                    database_secret, self.selected_database
+                ):
+                    return "❌ 데이터베이스 연결에 실패했습니다."
+                logger.info("공용 DB 연결 설정 완료")
 
             validation_results = []
             summary_results = []
 
-            # 각 파일을 validate_sql_file로 개별 검증
-            for sql_file in files_to_process:
-                try:
-                    # validate_sql_file 호출
-                    result = await self.validate_sql_file(sql_file.name, database_secret)
-                    
-                    # 결과 파싱 (간단한 성공/실패 판단)
-                    if "✅ 모든 검증을 통과했습니다" in result:
-                        status = "PASS"
+            try:
+                for sql_file in files_to_process:
+                    try:
+                        # 개별 파일 검증 (공용 연결 사용)
+                        ddl_content = sql_file.read_text(encoding="utf-8")
+                        ddl_type = self.detect_ddl_type(ddl_content)
+
+                        # 데이터베이스 연결 및 검증 (공용 커서 사용)
+                        db_connection_info = None
                         issues = []
-                        summary_results.append(f"**{sql_file.name}**: ✅ 통과")
-                    else:
-                        status = "FAIL"
-                        # 간단한 이슈 추출
-                        issues = ["검증 실패 - 상세 내용은 개별 보고서 참조"]
-                        summary_results.append(f"**{sql_file.name}**: ❌ 실패 (1개 문제)")
 
-                    # 파일 내용 읽기
-                    ddl_content = sql_file.read_text(encoding="utf-8")
-                    ddl_type = self.detect_ddl_type(ddl_content)
+                        if database_secret and self.shared_cursor:
+                            # 공용 커서로 검증 수행
+                            cursor = self.get_shared_cursor()
 
-                    validation_results.append({
-                        "filename": sql_file.name,
-                        "ddl_content": ddl_content,
-                        "ddl_type": ddl_type,
-                        "status": status,
-                        "issues": issues,
-                    })
+                            # 스키마 검증 (공용 커서 사용)
+                            schema_validation = await self.validate_schema_with_cursor(
+                                ddl_content, cursor
+                            )
+                            if schema_validation and not schema_validation.get(
+                                "valid", True
+                            ):
+                                issues.extend(schema_validation.get("issues", []))
 
-                except Exception as e:
-                    validation_results.append({
-                        "filename": sql_file.name,
-                        "ddl_content": f"파일 읽기 실패: {str(e)}",
-                        "ddl_type": "UNKNOWN",
-                        "status": "FAIL",
-                        "issues": [f"검증 실패: {str(e)}"],
-                    })
-                    summary_results.append(f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}")
+                            # 제약조건 검증 (공용 커서 사용)
+                            constraint_validation = (
+                                await self.validate_constraints_with_cursor(
+                                    ddl_content, cursor
+                                )
+                            )
+                            if constraint_validation and not constraint_validation.get(
+                                "valid", True
+                            ):
+                                issues.extend(constraint_validation.get("issues", []))
+
+                        status = "PASS" if not issues else "FAIL"
+
+                        # 결과 저장
+                        validation_results.append(
+                            {
+                                "filename": sql_file.name,
+                                "ddl_content": ddl_content,
+                                "ddl_type": ddl_type,
+                                "status": status,
+                                "issues": issues,
+                            }
+                        )
+
+                        summary_results.append(
+                            f"**{sql_file.name}**: {'✅ 통과' if status == 'PASS' else f'❌ 실패 ({len(issues)}개 문제)'}"
+                        )
+
+                    except Exception as e:
+                        validation_results.append(
+                            {
+                                "filename": sql_file.name,
+                                "ddl_content": f"파일 읽기 실패: {str(e)}",
+                                "ddl_type": "UNKNOWN",
+                                "status": "FAIL",
+                                "issues": [f"검증 실패: {str(e)}"],
+                            }
+                        )
+                        summary_results.append(
+                            f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}"
+                        )
+
+            finally:
+                # 공용 연결 정리 (모든 파일 검증 완료 후)
+                if database_secret:
+                    logger.info("공용 연결 정리 시작")
+                    self.cleanup_shared_connection()
+                    logger.info("공용 연결 정리 완료")
 
             # 통합 HTML 보고서 생성
             if validation_results:
@@ -4822,6 +4853,9 @@ Knowledge Base 참고 정보:
                 failed_files = total_files - passed_files
 
                 summary = f"📊 총 {total_files}개 파일 검증 완료"
+                if len(sql_files) > 5:
+                    summary += f" (전체 {len(sql_files)}개 중 5개 처리)"
+
                 summary += f"\n• 통과: {passed_files}개 ({round(passed_files/total_files*100)}%)"
                 summary += f"\n• 실패: {failed_files}개 ({round(failed_files/total_files*100)}%)"
                 summary += f"\n\n📄 통합 보고서가 저장되었습니다: {report_path}"
@@ -4829,9 +4863,6 @@ Knowledge Base 참고 정보:
                 return f"{summary}\n\n" + "\n".join(summary_results)
             else:
                 return "검증할 파일이 없습니다."
-
-        except Exception as e:
-            return f"전체 SQL 파일 검증 실패: {str(e)}"
 
         except Exception as e:
             # 예외 발생 시에도 연결 정리
@@ -5667,7 +5698,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="validate_all_sql",
-            description="모든 SQL 파일 일괄 검증",
+            description="모든 SQL 파일 일괄 검증 (최대 5개)",
             inputSchema={
                 "type": "object",
                 "properties": {
