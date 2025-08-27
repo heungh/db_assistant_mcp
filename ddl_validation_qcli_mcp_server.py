@@ -80,6 +80,13 @@ class DBAssistantMCPServer:
         self.shared_cursor = None
         self.tunnel_used = False
 
+        # 성능 임계값 설정
+        self.PERFORMANCE_THRESHOLDS = {
+            "max_rows_scan": 10_000_000,  # 1천만 행 이상 스캔 시 실패
+            "table_scan_ratio": 0.1,      # 테이블의 10% 이상 스캔 시 경고
+            "critical_rows_scan": 50_000_000,  # 5천만 행 이상 스캔 시 심각한 문제
+        }
+
         # 분석 관련 초기화
         self.cloudwatch = None
         self.default_metrics = [
@@ -489,11 +496,62 @@ class DBAssistantMCPServer:
             result["issues"].append(f"EXPLAIN 실행 오류: {str(e)}")
             return result
 
+    def check_performance_issues(self, explain_data, query_content, debug_log):
+        """EXPLAIN 결과에서 성능 문제 검사"""
+        debug_log("🔍🔍🔍 check_performance_issues 함수 시작 🔍🔍🔍")
+        performance_issues = []
+        
+        # 승인된 대용량 배치 쿼리 체크
+        batch_approval_patterns = [
+            r"대용량\s*배치.*승인",
+            r"배치.*승인.*받음",
+            r"승인.*대용량",
+            r"approved.*batch",
+            r"batch.*approved"
+        ]
+        
+        is_approved_batch = False
+        for pattern in batch_approval_patterns:
+            if re.search(pattern, query_content, re.IGNORECASE):
+                is_approved_batch = True
+                debug_log(f"승인된 대용량 배치 쿼리로 인식: {pattern}")
+                break
+        
+        debug_log(f"EXPLAIN 데이터 행 수: {len(explain_data)}")
+        for idx, row in enumerate(explain_data):
+            debug_log(f"EXPLAIN 행 {idx}: {row}")
+            if len(row) >= 10:  # EXPLAIN 결과 구조 확인
+                rows_examined = row[9] if row[9] is not None else 0
+                debug_log(f"검사할 행 수: {rows_examined}")
+                
+                if rows_examined >= self.PERFORMANCE_THRESHOLDS["critical_rows_scan"]:
+                    if is_approved_batch:
+                        issue = f"⚠️ 경고: 대용량 테이블 스캔 ({rows_examined:,}행) - 승인된 배치 작업"
+                        performance_issues.append(issue)
+                        debug_log(f"승인된 배치 - 경고 추가: {issue}")
+                    else:
+                        issue = f"❌ 실패: 심각한 성능 문제 - 대용량 테이블 전체 스캔 ({rows_examined:,}행)"
+                        performance_issues.append(issue)
+                        debug_log(f"심각한 성능 문제 - 실패 추가: {issue}")
+                        
+                elif rows_examined >= self.PERFORMANCE_THRESHOLDS["max_rows_scan"]:
+                    if is_approved_batch:
+                        issue = f"⚠️ 경고: 대용량 테이블 스캔 ({rows_examined:,}행) - 승인된 배치 작업"
+                        performance_issues.append(issue)
+                        debug_log(f"승인된 배치 - 경고 추가: {issue}")
+                    else:
+                        issue = f"❌ 실패: 성능 문제 - 대용량 테이블 스캔 ({rows_examined:,}행)"
+                        performance_issues.append(issue)
+                        debug_log(f"성능 문제 - 실패 추가: {issue}")
+        
+        debug_log(f"🔍🔍🔍 check_performance_issues 완료 - 이슈: {performance_issues}, 승인: {is_approved_batch} 🔍🔍🔍")
+        return performance_issues, is_approved_batch
+
     async def execute_explain_individual_queries(
         self, sql_content: str, cursor, debug_log
     ):
         """개별 쿼리로 분리하여 EXPLAIN 실행 - CREATE 구문 고려"""
-        result = {"issues": [], "explain_data": []}
+        result = {"issues": [], "explain_data": [], "performance_issues": []}
 
         try:
             if cursor is None:
@@ -520,14 +578,17 @@ class DBAssistantMCPServer:
                 if not stmt.strip():
                     continue
 
-                # 주석 제거
-                cleaned_stmt = re.sub(r"--.*$", "", stmt, flags=re.MULTILINE).strip()
+                # 주석 제거 (라인 주석과 블록 주석 모두)
+                cleaned_stmt = re.sub(r"--.*$", "", stmt, flags=re.MULTILINE)  # 라인 주석 제거
+                cleaned_stmt = re.sub(r"/\*.*?\*/", "", cleaned_stmt, flags=re.DOTALL)  # 블록 주석 제거
+                cleaned_stmt = cleaned_stmt.strip()
+                debug_log(f"쿼리 {i+1} 정리 후: {repr(cleaned_stmt[:100])}")  # 디버그 로그 추가
                 if not cleaned_stmt:
                     continue
 
                 # DDL/DML 구문은 EXPLAIN 스킵
                 ddl_pattern = re.match(
-                    r"^\s*(CREATE|ALTER|DROP)",
+                    r"^\s*(CREATE|ALTER|DROP|RENAME)",
                     cleaned_stmt,
                     re.IGNORECASE,
                 )
@@ -539,12 +600,12 @@ class DBAssistantMCPServer:
 
                 if ddl_pattern:
                     debug_log(
-                        f"쿼리 {i+1}: DDL 구문이므로 EXPLAIN 스킵 ({ddl_pattern.group(1).upper()})"
+                        f"🔥🔥🔥 쿼리 {i+1}: DDL 구문이므로 EXPLAIN 스킵 ({ddl_pattern.group(1).upper()}) 🔥🔥🔥"
                     )
                     continue
                 elif dml_pattern:
                     debug_log(
-                        f"쿼리 {i+1}: DML 구문이므로 EXPLAIN 스킵 ({dml_pattern.group(1).upper()})"
+                        f"🔥🔥🔥 쿼리 {i+1}: DML 구문이므로 EXPLAIN 스킵 ({dml_pattern.group(1).upper()}) 🔥🔥🔥"
                     )
                     continue
 
@@ -566,9 +627,26 @@ class DBAssistantMCPServer:
                     # 각 쿼리에 대해 EXPLAIN 실행
                     explain_query = f"EXPLAIN {cleaned_stmt}"
                     debug_log(f"개별 쿼리 {i+1} EXPLAIN: {cleaned_stmt[:100]}...")
+                    debug_log(f"🚨🚨🚨 성능 검사 코드 버전 확인 - 임계값: {self.PERFORMANCE_THRESHOLDS} 🚨🚨🚨")
 
                     cursor.execute(explain_query)
                     explain_data = cursor.fetchall()
+                    
+                    # 성능 문제 검사
+                    debug_log(f"🔍 성능 검사 시작 - 쿼리 {i+1}, EXPLAIN 행 수: {len(explain_data)}")
+                    perf_issues, is_approved = self.check_performance_issues(
+                        explain_data, cleaned_stmt, debug_log
+                    )
+                    debug_log(f"🔍 성능 검사 완료 - 이슈: {perf_issues}, 승인됨: {is_approved}")
+                    
+                    if perf_issues:
+                        result["performance_issues"].extend(perf_issues)
+                        debug_log(f"⚠️ 성능 이슈 추가됨: {perf_issues}")
+                        # 승인되지 않은 대용량 스캔은 오류로 처리
+                        if not is_approved and any("❌ 실패" in issue for issue in perf_issues):
+                            result["issues"].extend(perf_issues)
+                            debug_log(f"❌ 성능 이슈를 오류로 처리: {perf_issues}")
+                    
                     result["explain_data"].append(
                         {
                             "query_index": i + 1,
@@ -1758,7 +1836,7 @@ class DBAssistantMCPServer:
                 debug_log("세미콜론 검증 통과")
 
             # 2. SQL 타입 확인
-            sql_type = self.extract_ddl_type(ddl_content)
+            sql_type = self.extract_ddl_type(ddl_content, debug_log)
             debug_log(f"SQL 타입: {sql_type}")
 
             # 3. SQL 타입에 따른 검증 분기
@@ -1769,7 +1847,7 @@ class DBAssistantMCPServer:
                 "DROP_TABLE",
                 "DROP_INDEX",
             ]
-            dql_types = ["SELECT", "UPDATE", "DELETE", "INSERT"]
+            dql_types = ["SELECT", "UPDATE", "DELETE", "INSERT", "MIXED_SELECT"]
             skip_types = ["SHOW", "SET", "USE"]  # 스킵할 SQL 타입
 
             if database_secret:
@@ -1821,9 +1899,26 @@ class DBAssistantMCPServer:
                             if ddl_validation["issues"]:
                                 issues.extend(ddl_validation["issues"])
 
-                        # DQL(DML) 검증
+                        # DQL(DML) 검증 - MIXED_SELECT 포함
                         elif sql_type in dql_types:
                             debug_log(f"DQL 검증 수행: {sql_type}")
+
+                            # MIXED_SELECT인 경우 DDL과 DML 모두 검증
+                            if sql_type == "MIXED_SELECT":
+                                debug_log("=== 혼합 SQL 파일 검증 시작 ===")
+                                
+                                # 1. DDL 구문 검증
+                                debug_log("혼합 파일 내 DDL 구문 검증 시작")
+                                ddl_validation = (
+                                    await self.validate_individual_ddl_statements(
+                                        ddl_content, cursor, debug_log, cte_tables
+                                    )
+                                )
+                                debug_log(
+                                    f"혼합 파일 DDL 검증 완료: {len(ddl_validation['issues'])}개 이슈"
+                                )
+                                if ddl_validation["issues"]:
+                                    issues.extend(ddl_validation["issues"])
 
                             # DML 검증 (CTE alias는 스킵하되, 실제 테이블은 검증)
                             debug_log("개별 쿼리 EXPLAIN 함수 호출 시작")
@@ -1837,6 +1932,14 @@ class DBAssistantMCPServer:
                             )
                             if explain_result["issues"]:
                                 issues.extend(explain_result["issues"])
+                            
+                            # 성능 이슈 처리
+                            if "performance_issues" in explain_result and explain_result["performance_issues"]:
+                                debug_log(f"성능 이슈 발견: {explain_result['performance_issues']}")
+                                # 성능 이슈가 있으면 전체 검증 실패로 처리
+                                for perf_issue in explain_result["performance_issues"]:
+                                    if "❌ 실패" in perf_issue:
+                                        issues.append(perf_issue)
 
                         else:
                             debug_log(f"알 수 없는 SQL 타입: {sql_type}")
@@ -2100,9 +2203,14 @@ class DBAssistantMCPServer:
         # 여러 문장이 있는 경우 마지막을 제외하고는 모두 세미콜론이 있어야 함
         return content.endswith(";")
 
-    def extract_ddl_type(self, ddl_content: str) -> str:
-        """DDL/DML 타입 추출 - SHOW/SET 구문 스킵하고 SELECT 우선 탐지"""
+    def extract_ddl_type(self, ddl_content: str, debug_log=None) -> str:
+        """혼합 SQL 파일 타입 추출 - SELECT 쿼리가 많으면 MIXED_SELECT로 분류"""
+        import re
+        
         # 주석과 빈 줄을 제거하고 실제 구문만 추출
+        # 먼저 /* */ 스타일 주석을 전체적으로 제거
+        ddl_content = re.sub(r'/\*.*?\*/', '', ddl_content, flags=re.DOTALL)
+        
         lines = ddl_content.strip().split("\n")
         ddl_lines = []
 
@@ -2115,43 +2223,103 @@ class DBAssistantMCPServer:
         if not ddl_lines:
             return "UNKNOWN"
 
-        # 전체 내용을 분석하여 우선순위에 따라 타입 결정
+        # 전체 내용을 분석하여 구문 타입별 개수 계산
         full_content = " ".join(ddl_lines).upper()
         
-        # 개별 구문들을 분석하여 가장 중요한 타입 찾기
+        # 개별 구문들을 분석
         statements = []
         for line in ddl_lines:
             line_upper = line.upper().strip()
             if line_upper and not line_upper.startswith("/*"):
                 statements.append(line_upper)
         
-        # 우선순위별 타입 검사
-        type_priorities = [
-            # 1순위: DDL 구문 (가장 중요)
-            ("CREATE TABLE", "CREATE_TABLE"),
-            ("ALTER TABLE", "ALTER_TABLE"), 
-            ("CREATE INDEX", "CREATE_INDEX"),
-            ("DROP TABLE", "DROP_TABLE"),
-            ("DROP INDEX", "DROP_INDEX"),
+        # 구문 타입별 개수 계산
+        type_counts = {
+            "SELECT": 0,
+            "INSERT": 0,
+            "UPDATE": 0,
+            "DELETE": 0,
+            "CREATE_TABLE": 0,
+            "ALTER_TABLE": 0,
+            "CREATE_INDEX": 0,
+            "DROP_TABLE": 0,
+            "DROP_INDEX": 0,
+            "RENAME": 0
+        }
+        
+        # 각 구문 분석 - 세미콜론으로 분리된 실제 구문 단위로 계산
+        sql_statements = [stmt.strip() for stmt in ddl_content.split(';') if stmt.strip()]
+        
+        for stmt in sql_statements:
+            stmt_upper = stmt.upper().strip()
             
-            # 2순위: DML 구문 (EXPLAIN 분석 대상)
-            ("SELECT", "SELECT"),
-            ("INSERT", "INSERT"),
-            ("UPDATE", "UPDATE"),
-            ("DELETE", "DELETE"),
-        ]
+            # /* */ 스타일 주석 제거
+            stmt_upper = re.sub(r'/\*.*?\*/', '', stmt_upper, flags=re.DOTALL)
+            
+            # -- 스타일 주석 제거
+            stmt_lines = [line.strip() for line in stmt_upper.split('\n') 
+                         if line.strip() and not line.strip().startswith('--')]
+            if not stmt_lines:
+                continue
+                
+            stmt_clean = ' '.join(stmt_lines).strip()
+            
+            if stmt_clean.startswith("SELECT"):
+                type_counts["SELECT"] += 1
+            elif stmt_clean.startswith("INSERT"):
+                type_counts["INSERT"] += 1
+            elif stmt_clean.startswith("UPDATE"):
+                type_counts["UPDATE"] += 1
+            elif stmt_clean.startswith("DELETE"):
+                type_counts["DELETE"] += 1
+            elif stmt_clean.startswith("CREATE TABLE"):
+                type_counts["CREATE_TABLE"] += 1
+            elif stmt_clean.startswith("ALTER TABLE") or re.search(r'\bALTER\s+TABLE\b', stmt_clean):
+                type_counts["ALTER_TABLE"] += 1
+            elif stmt_clean.startswith("CREATE INDEX"):
+                type_counts["CREATE_INDEX"] += 1
+            elif stmt_clean.startswith("DROP TABLE"):
+                type_counts["DROP_TABLE"] += 1
+            elif stmt_clean.startswith("DROP INDEX"):
+                type_counts["DROP_INDEX"] += 1
+            elif stmt_clean.startswith("RENAME TABLE") or re.search(r'\bRENAME\s+TABLE\b', stmt_clean):
+                type_counts["RENAME"] += 1
         
-        # 각 우선순위별로 검사
-        for keyword, sql_type in type_priorities:
-            # 개별 구문에서 검사
-            for stmt in statements:
-                if stmt.startswith(keyword):
-                    return sql_type
-            # 전체 내용에서도 검사
-            if keyword in full_content:
-                return sql_type
+        # 총 구문 수
+        total_statements = sum(type_counts.values())
         
-        # 3순위: 기타 구문 (스킵 대상) - 다른 중요한 구문이 없을 때만
+        # 디버그 로그 추가
+        if debug_log:
+            debug_log(f"DEBUG - 구문 개수: {type_counts}")
+            debug_log(f"DEBUG - 총 구문: {total_statements}")
+        
+        # SELECT 쿼리가 50% 이상이면 MIXED_SELECT로 분류
+        if type_counts["SELECT"] > 0 and type_counts["SELECT"] >= total_statements * 0.5:
+            if debug_log:
+                debug_log("DEBUG - MIXED_SELECT로 분류됨")
+            return "MIXED_SELECT"
+        
+        # 기존 우선순위 로직 (DDL 우선)
+        if type_counts["CREATE_TABLE"] > 0:
+            return "CREATE_TABLE"
+        elif type_counts["ALTER_TABLE"] > 0 or type_counts["RENAME"] > 0:
+            return "ALTER_TABLE"
+        elif type_counts["CREATE_INDEX"] > 0:
+            return "CREATE_INDEX"
+        elif type_counts["DROP_TABLE"] > 0:
+            return "DROP_TABLE"
+        elif type_counts["DROP_INDEX"] > 0:
+            return "DROP_INDEX"
+        elif type_counts["SELECT"] > 0:
+            return "SELECT"
+        elif type_counts["INSERT"] > 0:
+            return "INSERT"
+        elif type_counts["UPDATE"] > 0:
+            return "UPDATE"
+        elif type_counts["DELETE"] > 0:
+            return "DELETE"
+        
+        # 기타 구문 처리
         if any(stmt.startswith("SHOW ") for stmt in statements):
             return "SHOW"
         elif any(stmt.startswith("SET ") for stmt in statements):
@@ -2460,18 +2628,29 @@ Knowledge Base 참고 정보:
         1. Aurora MySQL 8.0에서 문법적으로 올바른지 확인
         2. 성능상 문제가 있는지 분석
         3. 인덱스 사용 효율성 검토
+        4. **중요: 심각한 성능 문제가 있으면 검증 실패로 처리**
 
         **중요: 스키마 검증 실패 처리**
         {"스키마 검증에서 오류가 발견되었습니다. 테이블이 이미 존재하거나, 인덱스가 존재하거나, 기타 스키마 관련 문제가 있으면 반드시 실패로 평가해주세요." if schema_has_errors else ""}
 
+        **성능 문제 실패 기준:**
+        다음과 같은 심각한 성능 문제가 발견되면 반드시 "오류:"로 시작하여 실패로 평가하세요:
+        - 1천만 행 이상의 대용량 테이블에 대한 전체 테이블 스캔 (Full Table Scan)
+        - WHERE 절 없는 대용량 테이블 UPDATE/DELETE
+        - 인덱스 없는 대용량 테이블 JOIN
+        - 카디널리티가 매우 높은 GROUP BY나 ORDER BY 작업
+        - 임시 테이블을 사용하는 복잡한 서브쿼리
+
         **응답 규칙:**
-        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "쿼리가 실행 가능하면 반드시 '검증 통과'로 시작하세요"}
-        2. 성능 개선점이 있으면 "검증 통과 (성능 권장사항: ...)"로 표시하세요
-        3. 실행 불가능한 경우만 "오류:"로 시작하세요
+        1. {"스키마 검증에서 오류가 발견된 경우 반드시 '오류:'로 시작하여 실패로 평가하세요" if schema_has_errors else "쿼리가 실행 가능하고 심각한 성능 문제가 없으면 '검증 통과'로 시작하세요"}
+        2. 심각한 성능 문제가 있으면 "오류: 심각한 성능 문제 - ..."로 시작하여 실패로 평가하세요
+        3. 경미한 성능 개선점만 있으면 "검증 통과 (성능 권장사항: ...)"로 표시하세요
+        4. 실행 불가능한 경우는 "오류:"로 시작하세요
 
         **예시:**
-        - 실행 가능한 경우: "검증 통과"
-        - 성능 개선점 있는 경우: "검증 통과 (성능 권장사항: 인덱스 추가를 고려하세요)"
+        - 실행 가능하고 성능 문제 없음: "검증 통과"
+        - 경미한 성능 개선점: "검증 통과 (성능 권장사항: 인덱스 추가를 고려하세요)"
+        - 심각한 성능 문제: "오류: 심각한 성능 문제 - 1천만 행 이상 테이블의 전체 스캔으로 운영 환경에서 사용 불가"
         - 실행 불가능한 경우: "오류: 존재하지 않는 테이블을 참조합니다"
 
         반드시 위 형식으로만 응답하세요.
@@ -5969,13 +6148,21 @@ Knowledge Base 참고 정보:
                         AND AVG_TIMER_WAIT >= 1000000000000
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
+                        AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
                     ORDER BY AVG_TIMER_WAIT DESC 
                     LIMIT 10
                 """
                 )
 
                 for (query,) in cursor.fetchall():
-                    collected_queries.add(query.strip())
+                    if query and query.strip():
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"performance_schema 접근 실패: {e}")
@@ -5990,6 +6177,7 @@ Knowledge Base 참고 정보:
                         AND TIME >= 1
                         AND INFO IS NOT NULL
                         AND INFO NOT LIKE '%PROCESSLIST%'
+                        AND INFO NOT LIKE 'EXPLAIN%'
                     ORDER BY TIME DESC
                     LIMIT 10
                 """
@@ -5997,7 +6185,13 @@ Knowledge Base 참고 정보:
 
                 for (query,) in cursor.fetchall():
                     if query and query.strip():
-                        collected_queries.add(query.strip())
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"PROCESSLIST 접근 실패: {e}")
@@ -6044,13 +6238,21 @@ Knowledge Base 참고 정보:
                         AND MAX_MEMORY_USED > 100*1024*1024
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
+                        AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
                     ORDER BY MAX_MEMORY_USED DESC 
                     LIMIT 10
                 """
                 )
 
                 for (query,) in cursor.fetchall():
-                    collected_queries.add(query.strip())
+                    if query and query.strip():
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"performance_schema 메모리 쿼리 접근 실패: {e}")
@@ -6101,13 +6303,21 @@ Knowledge Base 참고 정보:
                         AND SUM_TIMER_WAIT > 10000000000000
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
+                        AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
                     ORDER BY SUM_TIMER_WAIT DESC 
                     LIMIT 10
                 """
                 )
 
                 for (query,) in cursor.fetchall():
-                    collected_queries.add(query.strip())
+                    if query and query.strip():
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"performance_schema CPU 쿼리 접근 실패: {e}")
@@ -6122,6 +6332,7 @@ Knowledge Base 참고 정보:
                         AND STATE IN ('Sending data', 'Sorting result', 'Creating sort index', 'Copying to tmp table')
                         AND INFO IS NOT NULL
                         AND INFO NOT LIKE '%PROCESSLIST%'
+                        AND INFO NOT LIKE 'EXPLAIN%'
                     ORDER BY TIME DESC
                     LIMIT 10
                 """
@@ -6129,7 +6340,13 @@ Knowledge Base 참고 정보:
 
                 for (query,) in cursor.fetchall():
                     if query and query.strip():
-                        collected_queries.add(query.strip())
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"PROCESSLIST CPU 쿼리 접근 실패: {e}")
@@ -6176,13 +6393,21 @@ Knowledge Base 참고 정보:
                         AND (SUM_CREATED_TMP_TABLES > 0 OR SUM_CREATED_TMP_DISK_TABLES > 0 OR SUM_SORT_MERGE_PASSES > 0)
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
+                        AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
                     ORDER BY (SUM_CREATED_TMP_DISK_TABLES + SUM_SORT_MERGE_PASSES) DESC 
                     LIMIT 10
                 """
                 )
 
                 for (query,) in cursor.fetchall():
-                    collected_queries.add(query.strip())
+                    if query and query.strip():
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"performance_schema 임시공간 쿼리 접근 실패: {e}")
@@ -6197,6 +6422,7 @@ Knowledge Base 참고 정보:
                         AND STATE IN ('Copying to tmp table', 'Sorting for group', 'Sorting for order', 'Creating sort index')
                         AND INFO IS NOT NULL
                         AND INFO NOT LIKE '%PROCESSLIST%'
+                        AND INFO NOT LIKE 'EXPLAIN%'
                     ORDER BY TIME DESC
                     LIMIT 10
                 """
@@ -6204,7 +6430,13 @@ Knowledge Base 참고 정보:
 
                 for (query,) in cursor.fetchall():
                     if query and query.strip():
-                        collected_queries.add(query.strip())
+                        query_clean = query.strip()
+                        # EXPLAIN으로 시작하는 쿼리 제외
+                        if not query_clean.upper().startswith('EXPLAIN'):
+                            # performance_schema, information_schema 관련 쿼리 제외
+                            if ('performance_schema' not in query_clean.lower() and 
+                                'information_schema' not in query_clean.lower()):
+                                collected_queries.add(query_clean)
 
             except Exception as e:
                 print(f"PROCESSLIST 임시공간 쿼리 접근 실패: {e}")
