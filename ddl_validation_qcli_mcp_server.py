@@ -105,10 +105,10 @@ class DBAssistantMCPServer:
 
     def parse_table_name(self, full_table_name: str) -> tuple:
         """테이블명에서 스키마와 테이블명을 분리"""
-        if '.' in full_table_name:
-            schema, table = full_table_name.split('.', 1)
-            return schema.strip('`'), table.strip('`')
-        return None, full_table_name.strip('`')
+        if "." in full_table_name:
+            schema, table = full_table_name.split(".", 1)
+            return schema.strip("`"), table.strip("`")
+        return None, full_table_name.strip("`")
 
     async def query_knowledge_base(self, query: str, sql_type: str) -> str:
         """Knowledge Base에서 관련 정보 조회"""
@@ -536,12 +536,16 @@ class DBAssistantMCPServer:
                     cleaned_stmt,
                     re.IGNORECASE,
                 )
-                
+
                 if ddl_pattern:
-                    debug_log(f"쿼리 {i+1}: DDL 구문이므로 EXPLAIN 스킵 ({ddl_pattern.group(1).upper()})")
+                    debug_log(
+                        f"쿼리 {i+1}: DDL 구문이므로 EXPLAIN 스킵 ({ddl_pattern.group(1).upper()})"
+                    )
                     continue
                 elif dml_pattern:
-                    debug_log(f"쿼리 {i+1}: DML 구문이므로 EXPLAIN 스킵 ({dml_pattern.group(1).upper()})")
+                    debug_log(
+                        f"쿼리 {i+1}: DML 구문이므로 EXPLAIN 스킵 ({dml_pattern.group(1).upper()})"
+                    )
                     continue
 
                 # 쿼리에서 참조하는 테이블 추출
@@ -1766,6 +1770,7 @@ class DBAssistantMCPServer:
                 "DROP_INDEX",
             ]
             dql_types = ["SELECT", "UPDATE", "DELETE", "INSERT"]
+            skip_types = ["SHOW", "SET", "USE"]  # 스킵할 SQL 타입
 
             if database_secret:
                 try:
@@ -1795,8 +1800,12 @@ class DBAssistantMCPServer:
                         debug_log(f"WITH절 CTE 테이블: {cte_tables}")
                         debug_log(f"WITH절 존재 여부: {has_with_clause}")
 
+                        # SQL 타입별 검증 분기
+                        if sql_type in skip_types:
+                            debug_log(f"SQL 타입 스킵: {sql_type} (SHOW/SET/USE 구문은 검증하지 않음)")
+                        
                         # DDL 검증
-                        if sql_type in ddl_types:
+                        elif sql_type in ddl_types:
                             debug_log(f"DDL 검증 수행: {sql_type}")
                             debug_log("=== 새로운 개별 DDL 검증 로직 시작 ===")
 
@@ -2092,7 +2101,7 @@ class DBAssistantMCPServer:
         return content.endswith(";")
 
     def extract_ddl_type(self, ddl_content: str) -> str:
-        """DDL/DML 타입 추출"""
+        """DDL/DML 타입 추출 - SHOW/SET 구문 스킵하고 SELECT 우선 탐지"""
         # 주석과 빈 줄을 제거하고 실제 구문만 추출
         lines = ddl_content.strip().split("\n")
         ddl_lines = []
@@ -2106,34 +2115,49 @@ class DBAssistantMCPServer:
         if not ddl_lines:
             return "UNKNOWN"
 
-        # 첫 번째 유효한 구문으로 타입 판단
-        ddl_upper = " ".join(ddl_lines).upper().strip()
-
-        # DDL 구문
-        if ddl_upper.startswith("CREATE TABLE"):
-            return "CREATE_TABLE"
-        elif ddl_upper.startswith("ALTER TABLE"):
-            return "ALTER_TABLE"
-        elif ddl_upper.startswith("CREATE INDEX"):
-            return "CREATE_INDEX"
-        elif ddl_upper.startswith("DROP TABLE"):
-            return "DROP_TABLE"
-        elif ddl_upper.startswith("DROP INDEX"):
-            return "DROP_INDEX"
-        # DML 구문
-        elif ddl_upper.startswith("SELECT"):
-            return "SELECT"
-        elif ddl_upper.startswith("INSERT"):
-            return "INSERT"
-        elif ddl_upper.startswith("UPDATE"):
-            return "UPDATE"
-        elif ddl_upper.startswith("DELETE"):
-            return "DELETE"
-        # 기타
-        elif ddl_upper.startswith("USE "):
-            return "USE"
-        elif ddl_upper.startswith("SHOW "):
+        # 전체 내용을 분석하여 우선순위에 따라 타입 결정
+        full_content = " ".join(ddl_lines).upper()
+        
+        # 개별 구문들을 분석하여 가장 중요한 타입 찾기
+        statements = []
+        for line in ddl_lines:
+            line_upper = line.upper().strip()
+            if line_upper and not line_upper.startswith("/*"):
+                statements.append(line_upper)
+        
+        # 우선순위별 타입 검사
+        type_priorities = [
+            # 1순위: DDL 구문 (가장 중요)
+            ("CREATE TABLE", "CREATE_TABLE"),
+            ("ALTER TABLE", "ALTER_TABLE"), 
+            ("CREATE INDEX", "CREATE_INDEX"),
+            ("DROP TABLE", "DROP_TABLE"),
+            ("DROP INDEX", "DROP_INDEX"),
+            
+            # 2순위: DML 구문 (EXPLAIN 분석 대상)
+            ("SELECT", "SELECT"),
+            ("INSERT", "INSERT"),
+            ("UPDATE", "UPDATE"),
+            ("DELETE", "DELETE"),
+        ]
+        
+        # 각 우선순위별로 검사
+        for keyword, sql_type in type_priorities:
+            # 개별 구문에서 검사
+            for stmt in statements:
+                if stmt.startswith(keyword):
+                    return sql_type
+            # 전체 내용에서도 검사
+            if keyword in full_content:
+                return sql_type
+        
+        # 3순위: 기타 구문 (스킵 대상) - 다른 중요한 구문이 없을 때만
+        if any(stmt.startswith("SHOW ") for stmt in statements):
             return "SHOW"
+        elif any(stmt.startswith("SET ") for stmt in statements):
+            return "SET"
+        elif any(stmt.startswith("USE ") for stmt in statements):
+            return "USE"
         else:
             return "UNKNOWN"
 
@@ -2918,7 +2942,7 @@ Knowledge Base 참고 정보:
 
                 try:
                     schema, actual_table = parse_table_name(table_name)
-                    
+
                     if schema:
                         cursor.execute(
                             """
@@ -2948,16 +2972,16 @@ Knowledge Base 참고 정보:
 
             def parse_table_name(full_table_name: str) -> tuple:
                 """테이블명에서 스키마와 테이블명을 분리"""
-                if '.' in full_table_name:
-                    schema, table = full_table_name.split('.', 1)
-                    return schema.strip('`'), table.strip('`')
-                return None, full_table_name.strip('`')
+                if "." in full_table_name:
+                    schema, table = full_table_name.split(".", 1)
+                    return schema.strip("`"), table.strip("`")
+                return None, full_table_name.strip("`")
 
             def table_exists(table_name: str) -> bool:
                 """테이블 존재 여부 확인 (스키마 정보 포함 처리)"""
                 try:
                     schema, actual_table = parse_table_name(table_name)
-                    
+
                     if schema:
                         # 스키마가 명시된 경우
                         cursor.execute(
@@ -3009,7 +3033,7 @@ Knowledge Base 참고 정보:
                     from_pattern = r"from\s+(?:(\w+)\.)?(\w+)(?:\s+(?:as\s+)?(\w+))?(?=\s+(?:where|order|group|limit|join|inner|left|right|full|cross|$|;))"
                     from_tables = re.findall(from_pattern, stmt_lower)
                     debug_log(f"구문 {i+1} FROM 패턴 결과: {from_tables}")
-                    
+
                     join_pattern = r"join\s+(?:(\w+)\.)?(\w+)(?:\s+(?:as\s+)?(\w+))?(?=\s+(?:on|$|;))"
                     join_tables = re.findall(join_pattern, stmt_lower)
                     debug_log(f"구문 {i+1} JOIN 패턴 결과: {join_tables}")
@@ -3021,8 +3045,22 @@ Knowledge Base 참고 정보:
                     for schema, table, alias in from_tables + join_tables:
                         full_table_name = f"{schema}.{table}" if schema else table
                         all_tables.add(full_table_name)
-                        debug_log(f"구문 {i+1} 테이블 추가: schema={schema}, table={table}, full_name={full_table_name}")
-                        if alias and alias not in ['where', 'order', 'group', 'limit', 'join', 'inner', 'left', 'right', 'full', 'cross', 'on']:
+                        debug_log(
+                            f"구문 {i+1} 테이블 추가: schema={schema}, table={table}, full_name={full_table_name}"
+                        )
+                        if alias and alias not in [
+                            "where",
+                            "order",
+                            "group",
+                            "limit",
+                            "join",
+                            "inner",
+                            "left",
+                            "right",
+                            "full",
+                            "cross",
+                            "on",
+                        ]:
                             table_aliases[alias] = full_table_name
 
                     debug_log(f"구문 {i+1}에서 참조하는 테이블: {all_tables}")
@@ -3045,7 +3083,7 @@ Knowledge Base 참고 정보:
                         matches = re.findall(pattern, stmt_lower)
                         for column in matches:
                             column_refs.append((table_or_alias, column))
-                    
+
                     debug_log(f"구문 {i+1}에서 발견된 컬럼 참조: {column_refs}")
 
                     # 컬럼 존재 여부 검증
@@ -3267,9 +3305,7 @@ Knowledge Base 참고 정보:
 
         # ALTER TABLE 파싱 (상세)
         # ADD COLUMN - 스키마 정보 포함 처리
-        alter_add_pattern = (
-            r"ALTER\s+TABLE\s+`?(?:(\w+)\.)?(\w+)`?\s+ADD\s+(?:COLUMN\s+)?`?(\w+)`?\s+([^,;]+)"
-        )
+        alter_add_pattern = r"ALTER\s+TABLE\s+`?(?:(\w+)\.)?(\w+)`?\s+ADD\s+(?:COLUMN\s+)?`?(\w+)`?\s+([^,;]+)"
         alter_add_matches = re.findall(alter_add_pattern, ddl_content, re.IGNORECASE)
         debug_log(f"ALTER TABLE ADD COLUMN 파싱 - 결과: {alter_add_matches}")
 
@@ -3284,7 +3320,9 @@ Knowledge Base 참고 정보:
                     "column_definition": column_def.strip(),
                 }
             )
-            debug_log(f"ALTER TABLE ADD COLUMN 구문 추가됨: {full_table_name}.{column_name}")
+            debug_log(
+                f"ALTER TABLE ADD COLUMN 구문 추가됨: {full_table_name}.{column_name}"
+            )
 
         # MODIFY COLUMN
         alter_modify_pattern = (
@@ -3352,9 +3390,7 @@ Knowledge Base 참고 정보:
         debug_log("일반 ALTER TABLE 파싱 건너뜀 - 상세 파싱으로 충분")
 
         # CREATE INDEX 파싱 - 스키마 정보 포함 처리
-        create_index_pattern = (
-            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+`?(\w+)`?\s+ON\s+`?(?:(\w+)\.)?(\w+)`?\s*\((.*?)\)"
-        )
+        create_index_pattern = r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+`?(\w+)`?\s+ON\s+`?(?:(\w+)\.)?(\w+)`?\s*\((.*?)\)"
         create_index_matches = re.findall(
             create_index_pattern, ddl_content, re.IGNORECASE
         )
@@ -4578,7 +4614,7 @@ Knowledge Base 참고 정보:
             success_section = ""
             if not issues:
                 success_section = """
-                <div class="issues-section success">
+                <div class="issues-section success" style="display: none;">
                     <h3>✅ 검증 결과</h3>
                     <p class="no-issues">모든 검증을 통과했습니다.</p>
                 </div>
@@ -4836,11 +4872,6 @@ Knowledge Base 참고 정보:
                 <div class="sql-code">{ddl_content}</div>
             </div>
             
-            <div class="info-section">
-                <h3>📊 검증 결과</h3>
-                <p style="font-size: 1.2em; font-weight: 500; color: {status_color};">{summary}</p>
-            </div>
-            
             <div class="claude-section">
                 <h3>🔍 통합 검증 결과 (스키마 + 쿼리성능)</h3>
                 <div class="claude-result">
@@ -4860,6 +4891,42 @@ Knowledge Base 참고 정보:
 
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write(report_content)
+
+            # 검증 결과 섹션 제거
+            try:
+                with open(report_path, "r", encoding="utf-8") as f:
+                    html_content = f.read()
+                
+                # 검증 결과 섹션 제거 - 더 정확한 방법
+                lines = html_content.split('\n')
+                new_lines = []
+                i = 0
+                
+                while i < len(lines):
+                    line = lines[i]
+                    
+                    # 검증 결과 섹션 시작 감지
+                    if '<div class="info-section" style="display: none;">' in line:
+                        # 다음 라인들을 확인하여 검증 결과 섹션인지 판단
+                        if i + 1 < len(lines) and '📊 검증 결과' in lines[i + 1]:
+                            # 검증 결과 섹션이므로 </div>까지 스킵
+                            i += 1  # 현재 div 라인 스킵
+                            while i < len(lines):
+                                if '</div>' in lines[i]:
+                                    i += 1  # </div> 라인도 스킵
+                                    break
+                                i += 1
+                            continue
+                    
+                    new_lines.append(line)
+                    i += 1
+                
+                html_content = '\n'.join(new_lines)
+                
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+            except Exception as e:
+                pass
 
             # 파일 생성 확인 디버그
             try:
@@ -5144,104 +5211,206 @@ Knowledge Base 참고 정보:
             logger.error(f"통합 HTML 보고서 생성 오류: {e}")
             return f"보고서 생성 실패: {str(e)}"
 
-    async def validate_all_sql_files(
-        self, database_secret: Optional[str] = None
+    async def generate_consolidated_report(
+        self, keyword: Optional[str] = None, report_files: Optional[List[str]] = None, 
+        date_filter: Optional[str] = None, latest_count: Optional[int] = None
     ) -> str:
-        """모든 SQL 파일 검증 및 통합 보고서 생성 - validate_sql_file 사용"""
+        """기존 HTML 보고서들을 기반으로 통합 보고서 생성"""
         try:
-            sql_files = list(SQL_DIR.glob("*.sql"))
-            if not sql_files:
-                return "sql 디렉토리에 SQL 파일이 없습니다."
-
-            # 모든 파일 처리
-            files_to_process = sql_files
-            logger.info(f"총 {len(sql_files)}개 SQL 파일을 검증합니다.")
-
-            validation_results = []
-            summary_results = []
-
-            # 각 파일을 validate_sql_file로 개별 검증
-            for sql_file in files_to_process:
-                try:
-                    # validate_sql_file 호출
-                    result = await self.validate_sql_file(
-                        sql_file.name, database_secret
-                    )
-
-                    # 결과 파싱 (간단한 성공/실패 판단)
-                    if "✅ 모든 검증을 통과했습니다" in result:
-                        status = "PASS"
-                        issues = []
-                        summary_results.append(f"**{sql_file.name}**: ✅ 통과")
-                    else:
-                        status = "FAIL"
-                        # 간단한 이슈 추출
-                        issues = ["검증 실패 - 상세 내용은 개별 보고서 참조"]
-                        summary_results.append(
-                            f"**{sql_file.name}**: ❌ 실패 (1개 문제)"
-                        )
-
-                    # 파일 내용 읽기
-                    ddl_content = sql_file.read_text(encoding="utf-8")
-                    ddl_type = self.detect_ddl_type(ddl_content)
-
-                    validation_results.append(
-                        {
-                            "filename": sql_file.name,
-                            "ddl_content": ddl_content,
-                            "ddl_type": ddl_type,
-                            "status": status,
-                            "issues": issues,
-                        }
-                    )
-
-                except Exception as e:
-                    validation_results.append(
-                        {
-                            "filename": sql_file.name,
-                            "ddl_content": f"파일 읽기 실패: {str(e)}",
-                            "ddl_type": "UNKNOWN",
-                            "status": "FAIL",
-                            "issues": [f"검증 실패: {str(e)}"],
-                        }
-                    )
-                    summary_results.append(
-                        f"**{sql_file.name}**: ❌ 검증 실패 - {str(e)}"
-                    )
-
-            # 통합 HTML 보고서 생성
-            if validation_results:
-                report_path = await self.generate_consolidated_html_report(
-                    validation_results, database_secret or "N/A"
-                )
-
-                # 통계 계산
-                total_files = len(validation_results)
-                passed_files = sum(
-                    1 for r in validation_results if r["status"] == "PASS"
-                )
-                failed_files = total_files - passed_files
-
-                summary = f"📊 총 {total_files}개 파일 검증 완료"
-                summary += f"\n• 통과: {passed_files}개 ({round(passed_files/total_files*100)}%)"
-                summary += f"\n• 실패: {failed_files}개 ({round(failed_files/total_files*100)}%)"
-                summary += f"\n\n📄 통합 보고서가 저장되었습니다: {report_path}"
-
-                return f"{summary}\n\n" + "\n".join(summary_results)
+            # 보고서 파일 수집
+            if report_files:
+                # 특정 파일들 지정된 경우
+                html_files = [OUTPUT_DIR / f for f in report_files if (OUTPUT_DIR / f).exists()]
             else:
-                return "검증할 파일이 없습니다."
+                # validation_report로 시작하는 HTML 파일만 (debug_log 제외)
+                html_files = list(OUTPUT_DIR.glob("validation_report_*.html"))
+                
+                # 키워드 필터링
+                if keyword:
+                    html_files = [f for f in html_files if keyword in f.name]
+                
+                # 날짜 필터링 (YYYYMMDD 형식)
+                if date_filter:
+                    html_files = [f for f in html_files if date_filter in f.name]
+                
+                # 최신 파일 개수 제한
+                if latest_count:
+                    # 파일명의 타임스탬프로 정렬 (최신순)
+                    html_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    html_files = html_files[:latest_count]
+            
+            if not html_files:
+                return f"조건에 맞는 HTML 보고서를 찾을 수 없습니다. (키워드: {keyword}, 날짜: {date_filter}, 개수: {latest_count})"
+
+            # 각 보고서에서 정보 추출
+            report_data = []
+            for html_file in html_files:
+                try:
+                    content = html_file.read_text(encoding='utf-8')
+                    
+                    # 파일명에서 원본 SQL 파일명 추출
+                    sql_filename = html_file.name.replace('validation_report_', '').replace('.html', '')
+                    if '_2025' in sql_filename:
+                        sql_filename = sql_filename.split('_2025')[0] + '.sql'
+                    
+                    # 검증 결과 추출 - HTML 구조 기반으로 정확히 추출
+                    if 'status-badge">PASS' in content or '✅ SQL 검증보고서' in content:
+                        status = 'PASS'
+                        status_icon = '✅'
+                    elif 'status-badge">FAIL' in content or '❌ SQL 검증보고서' in content:
+                        status = 'FAIL'
+                        status_icon = '❌'
+                    else:
+                        # 기본값으로 FAIL 처리
+                        status = 'FAIL'
+                        status_icon = '❌'
+                    
+                    # SQL 내용 일부 추출 (HTML 파일에서만)
+                    sql_preview = "SQL 내용을 찾을 수 없습니다"
+                    if 'sql-code' in content:
+                        import re
+                        sql_match = re.search(r'<div class="sql-code"[^>]*>(.*?)</div>', content, re.DOTALL)
+                        if sql_match:
+                            sql_preview = sql_match.group(1).strip()[:100] + "..."
+                    
+                    # 요약 정보 추출
+                    summary = "상세 내용은 개별 보고서 참조"
+                    if 'Claude AI 분석' in content:
+                        summary = "AI 분석 완료"
+                    
+                    report_data.append({
+                        'filename': sql_filename,
+                        'html_file': html_file.name,
+                        'status': status,
+                        'status_icon': status_icon,
+                        'sql_preview': sql_preview,
+                        'summary': summary
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"보고서 파싱 오류 {html_file}: {e}")
+                    continue
+
+            if not report_data:
+                return "유효한 보고서 데이터를 찾을 수 없습니다."
+
+            # 통합 보고서 HTML 생성
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_filename = f"consolidated_report_{timestamp}.html"
+            report_path = OUTPUT_DIR / report_filename
+
+            # 통계 계산
+            total_reports = len(report_data)
+            passed_reports = sum(1 for r in report_data if r['status'] == 'PASS')
+            failed_reports = total_reports - passed_reports
+
+            # 테이블 행 생성
+            table_rows = ""
+            for i, data in enumerate(report_data, 1):
+                table_rows += f"""
+                <tr onclick="openReport('{data['html_file']}')" style="cursor: pointer;">
+                    <td>{i}</td>
+                    <td>{data['status_icon']} {data['filename']}</td>
+                    <td><code>{data['sql_preview']}</code></td>
+                    <td><span class="status-badge {data['status'].lower()}">{data['status']}</span></td>
+                    <td>{data['summary']}</td>
+                </tr>
+                """
+
+            html_content = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>통합 검증 보고서</title>
+    <style>
+        body {{ font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1400px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }}
+        .header h1 {{ margin: 0; font-size: 2.5em; font-weight: 300; }}
+        .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 30px; }}
+        .stat-card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border-left: 4px solid #667eea; }}
+        .stat-number {{ font-size: 2em; font-weight: bold; color: #333; }}
+        .stat-label {{ color: #666; margin-top: 5px; }}
+        .table-container {{ margin: 30px; overflow-x: auto; }}
+        table {{ width: 100%; border-collapse: collapse; background: white; }}
+        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background: #f8f9fa; font-weight: 600; }}
+        tr:hover {{ background: #f8f9fa; }}
+        .status-badge {{ padding: 4px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }}
+        .status-badge.pass {{ background: #d4edda; color: #155724; }}
+        .status-badge.fail {{ background: #f8d7da; color: #721c24; }}
+        code {{ background: #f1f3f4; padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 통합 검증 보고서</h1>
+            <p>생성일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-number">{total_reports}</div>
+                <div class="stat-label">총 보고서</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{passed_reports}</div>
+                <div class="stat-label">검증 통과</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{failed_reports}</div>
+                <div class="stat-label">검증 실패</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{round(passed_reports/total_reports*100) if total_reports > 0 else 0}%</div>
+                <div class="stat-label">성공률</div>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <h2>📋 보고서 목록 (클릭하여 상세 보기)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>파일명</th>
+                        <th>SQL 미리보기</th>
+                        <th>검증 결과</th>
+                        <th>요약</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        function openReport(filename) {{
+            window.open(filename, '_blank');
+        }}
+    </script>
+</body>
+</html>"""
+
+            report_path.write_text(html_content, encoding='utf-8')
+            
+            return f"""📊 통합 보고서 생성 완료
+
+📈 요약:
+• 총 보고서: {total_reports}개
+• 검증 통과: {passed_reports}개 ({round(passed_reports/total_reports*100)}%)
+• 검증 실패: {failed_reports}개 ({round(failed_reports/total_reports*100)}%)
+
+📄 통합 보고서: {report_path}
+
+💡 사용법: 테이블의 각 행을 클릭하면 해당 상세 보고서가 새 창에서 열립니다."""
 
         except Exception as e:
-            return f"전체 SQL 파일 검증 실패: {str(e)}"
-
-        except Exception as e:
-            # 예외 발생 시에도 연결 정리
-            try:
-                if database_secret:
-                    self.cleanup_shared_connection()
-            except:
-                pass
-            return f"전체 SQL 파일 검증 실패: {str(e)}"
+            return f"통합 보고서 생성 실패: {str(e)}"
 
     async def copy_sql_file(
         self, source_path: str, target_name: Optional[str] = None
@@ -5794,10 +5963,10 @@ Knowledge Base 참고 정보:
             try:
                 cursor.execute(
                     """
-                    SELECT DIGEST_TEXT 
+                    SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
-                        AND AVG_TIMER_WAIT > 1000000000000
+                        AND AVG_TIMER_WAIT >= 1000000000000
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
                     ORDER BY AVG_TIMER_WAIT DESC 
@@ -5818,7 +5987,7 @@ Knowledge Base 참고 정보:
                     SELECT INFO 
                     FROM information_schema.PROCESSLIST 
                     WHERE COMMAND = 'Query' 
-                        AND TIME > 5
+                        AND TIME >= 1
                         AND INFO IS NOT NULL
                         AND INFO NOT LIKE '%PROCESSLIST%'
                     ORDER BY TIME DESC
@@ -5869,7 +6038,7 @@ Knowledge Base 참고 정보:
             try:
                 cursor.execute(
                     """
-                    SELECT DIGEST_TEXT 
+                    SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
                         AND MAX_MEMORY_USED > 100*1024*1024
@@ -5885,26 +6054,6 @@ Knowledge Base 참고 정보:
 
             except Exception as e:
                 print(f"performance_schema 메모리 쿼리 접근 실패: {e}")
-
-            # 2. information_schema에서 큰 테이블 관련 쿼리 수집
-            try:
-                cursor.execute(
-                    """
-                    SELECT CONCAT('SELECT * FROM ', TABLE_SCHEMA, '.', TABLE_NAME, ' LIMIT 1000') as query_text
-                    FROM information_schema.TABLES 
-                    WHERE TABLE_SCHEMA NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
-                        AND (DATA_LENGTH + INDEX_LENGTH) > 100*1024*1024
-                    ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC
-                    LIMIT 5
-                """
-                )
-
-                for (query,) in cursor.fetchall():
-                    if query and query.strip():
-                        collected_queries.add(query.strip())
-
-            except Exception as e:
-                print(f"큰 테이블 쿼리 생성 실패: {e}")
 
             # 쿼리가 있을 때만 파일 생성
             if collected_queries:
@@ -5946,7 +6095,7 @@ Knowledge Base 참고 정보:
             try:
                 cursor.execute(
                     """
-                    SELECT DIGEST_TEXT 
+                    SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
                         AND SUM_TIMER_WAIT > 10000000000000
@@ -6021,7 +6170,7 @@ Knowledge Base 참고 정보:
             try:
                 cursor.execute(
                     """
-                    SELECT DIGEST_TEXT 
+                    SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
                         AND (SUM_CREATED_TMP_TABLES > 0 OR SUM_CREATED_TMP_DISK_TABLES > 0 OR SUM_SORT_MERGE_PASSES > 0)
@@ -6430,17 +6579,29 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="validate_all_sql",
-            description="모든 SQL 파일 일괄 검증",
+            name="generate_consolidated_report",
+            description="기존 HTML 보고서들을 기반으로 통합 보고서 생성",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "database_secret": {
+                    "keyword": {
                         "type": "string",
-                        "description": "데이터베이스 시크릿 이름",
+                        "description": "필터링할 키워드 (선택사항)",
+                    },
+                    "report_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "특정 보고서 파일명 목록 (선택사항)",
+                    },
+                    "date_filter": {
+                        "type": "string",
+                        "description": "날짜 필터 (YYYYMMDD 형식, 선택사항)",
+                    },
+                    "latest_count": {
+                        "type": "integer",
+                        "description": "최신 파일 개수 제한 (선택사항)",
                     }
                 },
-                "required": ["database_secret"],
             },
         ),
     ]
@@ -6535,9 +6696,12 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             result = await db_assistant.test_individual_query_validation(
                 arguments["database_secret"], arguments["filename"]
             )
-        elif name == "validate_all_sql":
-            result = await db_assistant.validate_all_sql_files(
-                arguments["database_secret"]
+        elif name == "generate_consolidated_report":
+            result = await db_assistant.generate_consolidated_report(
+                arguments.get("keyword"), 
+                arguments.get("report_files"),
+                arguments.get("date_filter"),
+                arguments.get("latest_count")
             )
         else:
             result = f"알 수 없는 도구: {name}"
