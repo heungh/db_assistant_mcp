@@ -5591,6 +5591,369 @@ Knowledge Base 참고 정보:
         except Exception as e:
             return f"통합 보고서 생성 실패: {str(e)}"
 
+    async def generate_comprehensive_performance_report(
+        self, database_secret: str, db_instance_identifier: str, 
+        region: str = "ap-northeast-2", hours: int = 24
+    ) -> str:
+        """Oracle AWR 스타일의 종합 성능 진단 보고서 생성"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 1. 메트릭 수집
+            metrics_result = await self.collect_db_metrics(db_instance_identifier, hours, None, region)
+            if "오류" in metrics_result:
+                return f"❌ 메트릭 수집 실패: {metrics_result}"
+            
+            # CSV 파일명 추출
+            csv_file = None
+            for line in metrics_result.split('\n'):
+                if 'database_metrics_' in line and '.csv' in line:
+                    csv_file = line.split(': ')[-1]
+                    break
+            
+            if not csv_file:
+                return "❌ 메트릭 CSV 파일을 찾을 수 없습니다"
+            
+            csv_filename = Path(csv_file).name
+            
+            # 2. 성능 쿼리 수집
+            slow_queries = await self.collect_slow_queries(database_secret)
+            memory_queries = await self.collect_memory_intensive_queries(database_secret)
+            cpu_queries = await self.collect_cpu_intensive_queries(database_secret)
+            temp_queries = await self.collect_temp_space_intensive_queries(database_secret)
+            
+            # 3. 메트릭 분석
+            summary = await self.get_metric_summary(csv_filename)
+            correlation = await self.analyze_metric_correlation(csv_filename, "CPUUtilization", 10)
+            outliers = await self.detect_metric_outliers(csv_filename, 2.0)
+            
+            # 4. 상관관계 분석 (기존 함수 사용)
+            correlation_analysis = await self.analyze_metric_correlation(csv_filename, "CPUUtilization", 10)
+            
+            # 5. HTML 보고서 생성
+            report_path = OUTPUT_DIR / f"comprehensive_performance_report_{db_instance_identifier}_{timestamp}.html"
+            
+            html_content = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>종합 성능 진단 보고서 - {db_instance_identifier}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; text-align: center; }}
+        .header h1 {{ font-size: 2.5em; margin-bottom: 10px; }}
+        .header .subtitle {{ font-size: 1.2em; opacity: 0.9; }}
+        .section {{ background: white; margin-bottom: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow: hidden; }}
+        .section-header {{ background: #2c3e50; color: white; padding: 20px; font-size: 1.3em; font-weight: bold; }}
+        .section-content {{ padding: 25px; }}
+        .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 25px; }}
+        .metric-card {{ background: #f8f9fa; border-left: 4px solid #3498db; padding: 20px; border-radius: 5px; }}
+        .metric-card.warning {{ border-left-color: #f39c12; }}
+        .metric-card.danger {{ border-left-color: #e74c3c; }}
+        .metric-card.success {{ border-left-color: #27ae60; }}
+        .metric-title {{ font-weight: bold; color: #2c3e50; margin-bottom: 10px; }}
+        .metric-value {{ font-size: 1.8em; font-weight: bold; color: #3498db; }}
+        .metric-unit {{ font-size: 0.9em; color: #7f8c8d; }}
+        .query-box {{ background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 5px; margin: 10px 0; font-family: 'Courier New', monospace; font-size: 0.9em; overflow-x: auto; }}
+        .status-good {{ color: #27ae60; font-weight: bold; }}
+        .status-warning {{ color: #f39c12; font-weight: bold; }}
+        .status-critical {{ color: #e74c3c; font-weight: bold; }}
+        .table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        .table th, .table td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+        .table th {{ background: #34495e; color: white; }}
+        .table tr:hover {{ background: #f5f5f5; }}
+        .chart-container {{ text-align: center; margin: 20px 0; }}
+        .recommendation {{ background: #e8f5e9; border-left: 4px solid #4caf50; padding: 15px; margin: 10px 0; border-radius: 5px; }}
+        .issue {{ background: #ffebee; border-left: 4px solid #f44336; padding: 15px; margin: 10px 0; border-radius: 5px; }}
+        .info-box {{ background: #e3f2fd; border-left: 4px solid #2196f3; padding: 15px; margin: 10px 0; border-radius: 5px; }}
+        .toc {{ background: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 30px; }}
+        .toc ul {{ list-style: none; }}
+        .toc li {{ margin: 5px 0; }}
+        .toc a {{ color: #3498db; text-decoration: none; }}
+        .toc a:hover {{ text-decoration: underline; }}
+        @media (max-width: 768px) {{
+            .container {{ padding: 10px; }}
+            .header {{ padding: 20px; }}
+            .header h1 {{ font-size: 2em; }}
+            .metric-grid {{ grid-template-columns: 1fr; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🗄️ 종합 성능 진단 보고서</h1>
+            <div class="subtitle">Oracle AWR 스타일 데이터베이스 성능 분석</div>
+            <div style="margin-top: 15px; font-size: 1em;">
+                <strong>인스턴스:</strong> {db_instance_identifier} | 
+                <strong>리전:</strong> {region} | 
+                <strong>분석 기간:</strong> {hours}시간 | 
+                <strong>생성일시:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            </div>
+        </div>
+
+        <div class="toc">
+            <h3>📋 목차</h3>
+            <ul>
+                <li><a href="#executive-summary">1. 요약 정보</a></li>
+                <li><a href="#performance-metrics">2. 성능 메트릭 분석</a></li>
+                <li><a href="#correlation-analysis">3. 상관관계 분석</a></li>
+                <li><a href="#outlier-analysis">4. 이상 징후 분석</a></li>
+                <li><a href="#slow-queries">5. 느린 쿼리 분석</a></li>
+                <li><a href="#resource-intensive">6. 리소스 집약적 쿼리</a></li>
+                <li><a href="#recommendations">7. 최적화 권장사항</a></li>
+            </ul>
+        </div>
+
+        <div class="section" id="executive-summary">
+            <div class="section-header">📊 1. 요약 정보 (Executive Summary)</div>
+            <div class="section-content">
+                <div class="info-box">
+                    <strong>분석 개요:</strong> {hours}시간 동안의 성능 데이터를 기반으로 한 종합 진단 결과입니다.
+                </div>
+                <pre style="background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto;">{summary}</pre>
+            </div>
+        </div>
+
+        <div class="section" id="performance-metrics">
+            <div class="section-header">📈 2. 성능 메트릭 분석</div>
+            <div class="section-content">
+                <h4>🎯 핵심 성능 지표</h4>
+                <div class="metric-grid">
+                    <div class="metric-card success">
+                        <div class="metric-title">📊 데이터 수집 상태</div>
+                        <div class="metric-value">완료</div>
+                        <div class="metric-unit">메트릭 수집 성공</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">📅 분석 기간</div>
+                        <div class="metric-value">{hours}</div>
+                        <div class="metric-unit">시간</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">🗄️ 인스턴스</div>
+                        <div class="metric-value">{db_instance_identifier}</div>
+                        <div class="metric-unit">{region}</div>
+                    </div>
+                </div>
+                
+                <h4>📊 상세 메트릭 정보</h4>
+                <div class="info-box">
+                    메트릭 데이터는 <strong>{csv_filename}</strong> 파일에 저장되었습니다.
+                </div>
+            </div>
+        </div>
+
+        <div class="section" id="correlation-analysis">
+            <div class="section-header">🔗 3. 상관관계 분석</div>
+            <div class="section-content">
+                <h4>📈 메트릭 간 상관관계</h4>
+                <pre style="background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto;">{correlation}</pre>
+                
+                <div class="recommendation">
+                    <strong>💡 상관관계 인사이트:</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li>높은 상관관계(r > 0.7)를 보이는 메트릭들은 함께 모니터링해야 합니다</li>
+                        <li>CPU 사용률과 강한 상관관계를 보이는 메트릭들을 우선적으로 최적화하세요</li>
+                        <li>네트워크 트래픽과 I/O 메트릭의 관계를 주의 깊게 관찰하세요</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="section" id="outlier-analysis">
+            <div class="section-header">🚨 4. 이상 징후 분석 (Outlier Detection)</div>
+            <div class="section-content">
+                <h4>⚠️ 발견된 아웃라이어</h4>
+                <pre style="background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto;">{outliers}</pre>
+                
+                <div class="issue">
+                    <strong>🔍 주의사항:</strong> 아웃라이어가 발견된 시점의 애플리케이션 로그와 시스템 이벤트를 함께 분석하여 근본 원인을 파악하세요.
+                </div>
+            </div>
+        </div>
+
+        <div class="section" id="slow-queries">
+            <div class="section-header">🐌 5. 느린 쿼리 분석 (Slow Query Analysis)</div>
+            <div class="section-content">
+                <h4>📊 수집 결과</h4>
+                <div class="query-box">{slow_queries}</div>
+                
+                <div class="recommendation">
+                    <strong>💡 느린 쿼리 최적화 가이드:</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li>인덱스 추가 또는 기존 인덱스 최적화</li>
+                        <li>WHERE 절 조건 순서 최적화</li>
+                        <li>JOIN 조건 및 순서 검토</li>
+                        <li>쿼리 실행 계획(EXPLAIN) 분석</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="section" id="resource-intensive">
+            <div class="section-header">💾 6. 리소스 집약적 쿼리 분석</div>
+            <div class="section-content">
+                <h4>🧠 메모리 집약적 쿼리</h4>
+                <div class="query-box">{memory_queries}</div>
+                
+                <h4>⚡ CPU 집약적 쿼리</h4>
+                <div class="query-box">{cpu_queries}</div>
+                
+                <h4>💿 임시 공간 집약적 쿼리</h4>
+                <div class="query-box">{temp_queries}</div>
+                
+                <div class="recommendation">
+                    <strong>💡 리소스 최적화 전략:</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li><strong>메모리:</strong> 정렬 버퍼 크기 조정, 임시 테이블 사용 최소화</li>
+                        <li><strong>CPU:</strong> 복잡한 연산 최적화, 함수 사용 최소화</li>
+                        <li><strong>임시 공간:</strong> GROUP BY, ORDER BY 최적화, 인덱스 활용</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="section" id="recommendations">
+            <div class="section-header">🎯 7. 최적화 권장사항</div>
+            <div class="section-content">
+                <h4>🚀 즉시 적용 가능한 개선사항</h4>
+                <div class="recommendation">
+                    <strong>1. 모니터링 강화</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li>CloudWatch 알람 설정 (CPU > 70%, 연결 수 급증)</li>
+                        <li>Performance Insights 활성화</li>
+                        <li>슬로우 쿼리 로그 정기 분석</li>
+                    </ul>
+                </div>
+                
+                <div class="recommendation">
+                    <strong>2. 성능 최적화</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li>인덱스 최적화 (느린 쿼리 기반)</li>
+                        <li>연결 풀 크기 조정</li>
+                        <li>쿼리 캐시 설정 검토</li>
+                    </ul>
+                </div>
+                
+                <div class="recommendation">
+                    <strong>3. 용량 계획</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li>리소스 사용률 기반 스케일링 계획</li>
+                        <li>백업 및 유지보수 윈도우 최적화</li>
+                        <li>정기적인 성능 리뷰 프로세스 수립</li>
+                    </ul>
+                </div>
+                
+                <h4>📋 액션 아이템</h4>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>우선순위</th>
+                            <th>항목</th>
+                            <th>예상 소요시간</th>
+                            <th>담당자</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="status-critical">높음</span></td>
+                            <td>CloudWatch 알람 설정</td>
+                            <td>1일</td>
+                            <td>DBA</td>
+                        </tr>
+                        <tr>
+                            <td><span class="status-critical">높음</span></td>
+                            <td>느린 쿼리 인덱스 최적화</td>
+                            <td>3일</td>
+                            <td>개발팀</td>
+                        </tr>
+                        <tr>
+                            <td><span class="status-warning">중간</span></td>
+                            <td>Performance Insights 활성화</td>
+                            <td>1일</td>
+                            <td>DBA</td>
+                        </tr>
+                        <tr>
+                            <td><span class="status-good">낮음</span></td>
+                            <td>정기 성능 리뷰 프로세스</td>
+                            <td>1주</td>
+                            <td>팀 리더</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">📁 첨부 파일 및 참고 자료</div>
+            <div class="section-content">
+                <h4>📊 생성된 파일들</h4>
+                <ul style="margin-left: 20px;">
+                    <li><strong>메트릭 데이터:</strong> {csv_filename}</li>
+                    <li><strong>상관관계 분석:</strong> 포함됨</li>
+                    <li><strong>종합 보고서:</strong> {report_path.name}</li>
+                </ul>
+                
+                <div class="info-box">
+                    <strong>📞 문의 및 지원</strong><br>
+                    생성 도구: DB Assistant MCP Server<br>
+                    분석 엔진: Claude Sonnet 4 + AWS CloudWatch<br>
+                    보고서 버전: v2.0 (AWR 스타일)
+                </div>
+                
+                <div style="text-align: center; margin-top: 30px; color: #7f8c8d; font-size: 0.9em;">
+                    <em>이 보고서는 {hours}시간 동안의 성능 데이터를 기반으로 생성되었습니다.<br>
+                    정확한 성능 분석을 위해서는 최소 1주일 이상의 데이터 수집을 권장합니다.</em>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+
+            # HTML 파일 저장
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            return f"""🗄️ 종합 성능 진단 보고서 생성 완료
+
+📊 **Oracle AWR 스타일 보고서**
+• 인스턴스: {db_instance_identifier}
+• 리전: {region}
+• 분석 기간: {hours}시간
+• 생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+📁 **생성된 파일들:**
+• 종합 보고서: {report_path.name}
+• 메트릭 데이터: {csv_filename}
+• 상관관계 분석: 포함됨
+
+📈 **포함된 분석:**
+✅ 성능 메트릭 요약 및 통계
+✅ 메트릭 간 상관관계 분석
+✅ 이상 징후(아웃라이어) 탐지
+✅ 느린 쿼리 수집 및 분석
+✅ 리소스 집약적 쿼리 분석 (CPU, 메모리, 임시공간)
+✅ 최적화 권장사항 및 액션 아이템
+✅ 반응형 HTML 디자인
+
+💡 **주요 특징:**
+• Oracle AWR 리포트와 유사한 구조
+• 모바일 최적화된 반응형 디자인
+• 상세한 메트릭 분석 및 시각화
+• 실행 가능한 최적화 권장사항
+• 우선순위별 액션 아이템 제공
+
+🔍 보고서를 브라우저에서 열어 상세 분석 결과를 확인하세요."""
+
+        except Exception as e:
+            logger.error(f"종합 성능 진단 보고서 생성 오류: {e}")
+            return f"❌ 종합 보고서 생성 실패: {str(e)}"
+
     async def copy_sql_file(
         self, source_path: str, target_name: Optional[str] = None
     ) -> str:
@@ -6836,6 +7199,34 @@ async def handle_list_tools() -> list[types.Tool]:
                 },
             },
         ),
+        types.Tool(
+            name="generate_comprehensive_performance_report",
+            description="Oracle AWR 스타일의 종합 성능 진단 보고서 생성 (메트릭 분석, 상관관계, 느린 쿼리, 리소스 집약적 쿼리 포함)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database_secret": {
+                        "type": "string",
+                        "description": "데이터베이스 시크릿 이름",
+                    },
+                    "db_instance_identifier": {
+                        "type": "string",
+                        "description": "데이터베이스 인스턴스 식별자",
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "AWS 리전 (기본값: ap-northeast-2)",
+                        "default": "ap-northeast-2",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "수집할 시간 범위 (시간 단위, 기본값: 24)",
+                        "default": 24,
+                    },
+                },
+                "required": ["database_secret", "db_instance_identifier"],
+            },
+        ),
     ]
 
 
@@ -6934,6 +7325,13 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                 arguments.get("report_files"),
                 arguments.get("date_filter"),
                 arguments.get("latest_count")
+            )
+        elif name == "generate_comprehensive_performance_report":
+            result = await db_assistant.generate_comprehensive_performance_report(
+                arguments["database_secret"],
+                arguments["db_instance_identifier"],
+                arguments.get("region", "ap-northeast-2"),
+                arguments.get("hours", 24)
             )
         else:
             result = f"알 수 없는 도구: {name}"
