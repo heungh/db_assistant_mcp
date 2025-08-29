@@ -51,7 +51,14 @@ import mcp.server.stdio
 import logging
 
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/logs/ddl_validation.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # 현재 디렉토리 기준 경로 설정
@@ -68,9 +75,27 @@ DATA_DIR.mkdir(exist_ok=True)
 
 class DBAssistantMCPServer:
     def __init__(self):
-        self.bedrock_client = boto3.client(
-            "bedrock-runtime", region_name="us-west-2", verify=False
-        )
+        try:
+            logger.info("Bedrock 클라이언트 초기화 시작")
+            self.bedrock_client = boto3.client(
+                "bedrock-runtime", region_name="us-west-2", verify=False
+            )
+            logger.info("Bedrock 클라이언트 초기화 성공 - 리전: us-west-2")
+            
+            # Bedrock 접근 권한 테스트
+            try:
+                # 간단한 모델 목록 조회로 권한 테스트
+                bedrock_control = boto3.client("bedrock", region_name="us-west-2", verify=False)
+                logger.info("Bedrock 서비스 접근 권한 확인 중...")
+                # 실제 권한 테스트는 모델 호출 시 수행
+                logger.info("Bedrock 클라이언트 설정 완료")
+            except Exception as perm_e:
+                logger.warning(f"Bedrock 권한 사전 확인 실패 (모델 호출 시 재시도): {perm_e}")
+                
+        except Exception as e:
+            logger.error(f"Bedrock 클라이언트 초기화 실패: {e}")
+            raise
+            
         self.knowledge_base_id = "0WQUBRHVR8"
         self.selected_database = None
         self.current_plan = None
@@ -83,7 +108,7 @@ class DBAssistantMCPServer:
         # 성능 임계값 설정
         self.PERFORMANCE_THRESHOLDS = {
             "max_rows_scan": 10_000_000,  # 1천만 행 이상 스캔 시 실패
-            "table_scan_ratio": 0.1,      # 테이블의 10% 이상 스캔 시 경고
+            "table_scan_ratio": 0.1,  # 테이블의 10% 이상 스캔 시 경고
             "critical_rows_scan": 50_000_000,  # 5천만 행 이상 스캔 시 심각한 문제
         }
 
@@ -105,10 +130,21 @@ class DBAssistantMCPServer:
             "BufferCacheHitRatio",
         ]
 
+        # 기본 리전 설정
+        self.default_region = self.get_default_region()
+
         # Knowledge Base 클라이언트 초기화
         self.bedrock_agent_client = boto3.client(
             "bedrock-agent-runtime", region_name="us-east-1", verify=False
         )
+
+    def get_default_region(self) -> str:
+        """현재 AWS 프로파일의 기본 리전 가져오기"""
+        try:
+            session = boto3.Session()
+            return session.region_name or "ap-northeast-2"
+        except Exception:
+            return "ap-northeast-2"
 
     def parse_table_name(self, full_table_name: str) -> tuple:
         """테이블명에서 스키마와 테이블명을 분리"""
@@ -500,30 +536,30 @@ class DBAssistantMCPServer:
         """EXPLAIN 결과에서 성능 문제 검사"""
         debug_log("🔍🔍🔍 check_performance_issues 함수 시작 🔍🔍🔍")
         performance_issues = []
-        
+
         # 승인된 대용량 배치 쿼리 체크
         batch_approval_patterns = [
             r"대용량\s*배치.*승인",
             r"배치.*승인.*받음",
             r"승인.*대용량",
             r"approved.*batch",
-            r"batch.*approved"
+            r"batch.*approved",
         ]
-        
+
         is_approved_batch = False
         for pattern in batch_approval_patterns:
             if re.search(pattern, query_content, re.IGNORECASE):
                 is_approved_batch = True
                 debug_log(f"승인된 대용량 배치 쿼리로 인식: {pattern}")
                 break
-        
+
         debug_log(f"EXPLAIN 데이터 행 수: {len(explain_data)}")
         for idx, row in enumerate(explain_data):
             debug_log(f"EXPLAIN 행 {idx}: {row}")
             if len(row) >= 10:  # EXPLAIN 결과 구조 확인
                 rows_examined = row[9] if row[9] is not None else 0
                 debug_log(f"검사할 행 수: {rows_examined}")
-                
+
                 if rows_examined >= self.PERFORMANCE_THRESHOLDS["critical_rows_scan"]:
                     if is_approved_batch:
                         issue = f"⚠️ 경고: 대용량 테이블 스캔 ({rows_examined:,}행) - 승인된 배치 작업"
@@ -533,7 +569,7 @@ class DBAssistantMCPServer:
                         issue = f"❌ 실패: 심각한 성능 문제 - 대용량 테이블 전체 스캔 ({rows_examined:,}행)"
                         performance_issues.append(issue)
                         debug_log(f"심각한 성능 문제 - 실패 추가: {issue}")
-                        
+
                 elif rows_examined >= self.PERFORMANCE_THRESHOLDS["max_rows_scan"]:
                     if is_approved_batch:
                         issue = f"⚠️ 경고: 대용량 테이블 스캔 ({rows_examined:,}행) - 승인된 배치 작업"
@@ -543,8 +579,10 @@ class DBAssistantMCPServer:
                         issue = f"❌ 실패: 성능 문제 - 대용량 테이블 스캔 ({rows_examined:,}행)"
                         performance_issues.append(issue)
                         debug_log(f"성능 문제 - 실패 추가: {issue}")
-        
-        debug_log(f"🔍🔍🔍 check_performance_issues 완료 - 이슈: {performance_issues}, 승인: {is_approved_batch} 🔍🔍🔍")
+
+        debug_log(
+            f"🔍🔍🔍 check_performance_issues 완료 - 이슈: {performance_issues}, 승인: {is_approved_batch} 🔍🔍🔍"
+        )
         return performance_issues, is_approved_batch
 
     async def execute_explain_individual_queries(
@@ -579,10 +617,16 @@ class DBAssistantMCPServer:
                     continue
 
                 # 주석 제거 (라인 주석과 블록 주석 모두)
-                cleaned_stmt = re.sub(r"--.*$", "", stmt, flags=re.MULTILINE)  # 라인 주석 제거
-                cleaned_stmt = re.sub(r"/\*.*?\*/", "", cleaned_stmt, flags=re.DOTALL)  # 블록 주석 제거
+                cleaned_stmt = re.sub(
+                    r"--.*$", "", stmt, flags=re.MULTILINE
+                )  # 라인 주석 제거
+                cleaned_stmt = re.sub(
+                    r"/\*.*?\*/", "", cleaned_stmt, flags=re.DOTALL
+                )  # 블록 주석 제거
                 cleaned_stmt = cleaned_stmt.strip()
-                debug_log(f"쿼리 {i+1} 정리 후: {repr(cleaned_stmt[:100])}")  # 디버그 로그 추가
+                debug_log(
+                    f"쿼리 {i+1} 정리 후: {repr(cleaned_stmt[:100])}"
+                )  # 디버그 로그 추가
                 if not cleaned_stmt:
                     continue
 
@@ -627,26 +671,34 @@ class DBAssistantMCPServer:
                     # 각 쿼리에 대해 EXPLAIN 실행
                     explain_query = f"EXPLAIN {cleaned_stmt}"
                     debug_log(f"개별 쿼리 {i+1} EXPLAIN: {cleaned_stmt[:100]}...")
-                    debug_log(f"🚨🚨🚨 성능 검사 코드 버전 확인 - 임계값: {self.PERFORMANCE_THRESHOLDS} 🚨🚨🚨")
+                    debug_log(
+                        f"🚨🚨🚨 성능 검사 코드 버전 확인 - 임계값: {self.PERFORMANCE_THRESHOLDS} 🚨🚨🚨"
+                    )
 
                     cursor.execute(explain_query)
                     explain_data = cursor.fetchall()
-                    
+
                     # 성능 문제 검사
-                    debug_log(f"🔍 성능 검사 시작 - 쿼리 {i+1}, EXPLAIN 행 수: {len(explain_data)}")
+                    debug_log(
+                        f"🔍 성능 검사 시작 - 쿼리 {i+1}, EXPLAIN 행 수: {len(explain_data)}"
+                    )
                     perf_issues, is_approved = self.check_performance_issues(
                         explain_data, cleaned_stmt, debug_log
                     )
-                    debug_log(f"🔍 성능 검사 완료 - 이슈: {perf_issues}, 승인됨: {is_approved}")
-                    
+                    debug_log(
+                        f"🔍 성능 검사 완료 - 이슈: {perf_issues}, 승인됨: {is_approved}"
+                    )
+
                     if perf_issues:
                         result["performance_issues"].extend(perf_issues)
                         debug_log(f"⚠️ 성능 이슈 추가됨: {perf_issues}")
                         # 승인되지 않은 대용량 스캔은 오류로 처리
-                        if not is_approved and any("❌ 실패" in issue for issue in perf_issues):
+                        if not is_approved and any(
+                            "❌ 실패" in issue for issue in perf_issues
+                        ):
                             result["issues"].extend(perf_issues)
                             debug_log(f"❌ 성능 이슈를 오류로 처리: {perf_issues}")
-                    
+
                     result["explain_data"].append(
                         {
                             "query_index": i + 1,
@@ -1880,8 +1932,10 @@ class DBAssistantMCPServer:
 
                         # SQL 타입별 검증 분기
                         if sql_type in skip_types:
-                            debug_log(f"SQL 타입 스킵: {sql_type} (SHOW/SET/USE 구문은 검증하지 않음)")
-                        
+                            debug_log(
+                                f"SQL 타입 스킵: {sql_type} (SHOW/SET/USE 구문은 검증하지 않음)"
+                            )
+
                         # DDL 검증
                         elif sql_type in ddl_types:
                             debug_log(f"DDL 검증 수행: {sql_type}")
@@ -1906,7 +1960,7 @@ class DBAssistantMCPServer:
                             # MIXED_SELECT인 경우 DDL과 DML 모두 검증
                             if sql_type == "MIXED_SELECT":
                                 debug_log("=== 혼합 SQL 파일 검증 시작 ===")
-                                
+
                                 # 1. DDL 구문 검증
                                 debug_log("혼합 파일 내 DDL 구문 검증 시작")
                                 ddl_validation = (
@@ -1932,10 +1986,15 @@ class DBAssistantMCPServer:
                             )
                             if explain_result["issues"]:
                                 issues.extend(explain_result["issues"])
-                            
+
                             # 성능 이슈 처리
-                            if "performance_issues" in explain_result and explain_result["performance_issues"]:
-                                debug_log(f"성능 이슈 발견: {explain_result['performance_issues']}")
+                            if (
+                                "performance_issues" in explain_result
+                                and explain_result["performance_issues"]
+                            ):
+                                debug_log(
+                                    f"성능 이슈 발견: {explain_result['performance_issues']}"
+                                )
                                 # 성능 이슈가 있으면 전체 검증 실패로 처리
                                 for perf_issue in explain_result["performance_issues"]:
                                     if "❌ 실패" in perf_issue:
@@ -2206,11 +2265,11 @@ class DBAssistantMCPServer:
     def extract_ddl_type(self, ddl_content: str, debug_log=None) -> str:
         """혼합 SQL 파일 타입 추출 - SELECT 쿼리가 많으면 MIXED_SELECT로 분류"""
         import re
-        
+
         # 주석과 빈 줄을 제거하고 실제 구문만 추출
         # 먼저 /* */ 스타일 주석을 전체적으로 제거
-        ddl_content = re.sub(r'/\*.*?\*/', '', ddl_content, flags=re.DOTALL)
-        
+        ddl_content = re.sub(r"/\*.*?\*/", "", ddl_content, flags=re.DOTALL)
+
         lines = ddl_content.strip().split("\n")
         ddl_lines = []
 
@@ -2225,14 +2284,14 @@ class DBAssistantMCPServer:
 
         # 전체 내용을 분석하여 구문 타입별 개수 계산
         full_content = " ".join(ddl_lines).upper()
-        
+
         # 개별 구문들을 분석
         statements = []
         for line in ddl_lines:
             line_upper = line.upper().strip()
             if line_upper and not line_upper.startswith("/*"):
                 statements.append(line_upper)
-        
+
         # 구문 타입별 개수 계산
         type_counts = {
             "SELECT": 0,
@@ -2244,26 +2303,31 @@ class DBAssistantMCPServer:
             "CREATE_INDEX": 0,
             "DROP_TABLE": 0,
             "DROP_INDEX": 0,
-            "RENAME": 0
+            "RENAME": 0,
         }
-        
+
         # 각 구문 분석 - 세미콜론으로 분리된 실제 구문 단위로 계산
-        sql_statements = [stmt.strip() for stmt in ddl_content.split(';') if stmt.strip()]
-        
+        sql_statements = [
+            stmt.strip() for stmt in ddl_content.split(";") if stmt.strip()
+        ]
+
         for stmt in sql_statements:
             stmt_upper = stmt.upper().strip()
-            
+
             # /* */ 스타일 주석 제거
-            stmt_upper = re.sub(r'/\*.*?\*/', '', stmt_upper, flags=re.DOTALL)
-            
+            stmt_upper = re.sub(r"/\*.*?\*/", "", stmt_upper, flags=re.DOTALL)
+
             # -- 스타일 주석 제거
-            stmt_lines = [line.strip() for line in stmt_upper.split('\n') 
-                         if line.strip() and not line.strip().startswith('--')]
+            stmt_lines = [
+                line.strip()
+                for line in stmt_upper.split("\n")
+                if line.strip() and not line.strip().startswith("--")
+            ]
             if not stmt_lines:
                 continue
-                
-            stmt_clean = ' '.join(stmt_lines).strip()
-            
+
+            stmt_clean = " ".join(stmt_lines).strip()
+
             if stmt_clean.startswith("SELECT"):
                 type_counts["SELECT"] += 1
             elif stmt_clean.startswith("INSERT"):
@@ -2274,7 +2338,9 @@ class DBAssistantMCPServer:
                 type_counts["DELETE"] += 1
             elif stmt_clean.startswith("CREATE TABLE"):
                 type_counts["CREATE_TABLE"] += 1
-            elif stmt_clean.startswith("ALTER TABLE") or re.search(r'\bALTER\s+TABLE\b', stmt_clean):
+            elif stmt_clean.startswith("ALTER TABLE") or re.search(
+                r"\bALTER\s+TABLE\b", stmt_clean
+            ):
                 type_counts["ALTER_TABLE"] += 1
             elif stmt_clean.startswith("CREATE INDEX"):
                 type_counts["CREATE_INDEX"] += 1
@@ -2282,23 +2348,28 @@ class DBAssistantMCPServer:
                 type_counts["DROP_TABLE"] += 1
             elif stmt_clean.startswith("DROP INDEX"):
                 type_counts["DROP_INDEX"] += 1
-            elif stmt_clean.startswith("RENAME TABLE") or re.search(r'\bRENAME\s+TABLE\b', stmt_clean):
+            elif stmt_clean.startswith("RENAME TABLE") or re.search(
+                r"\bRENAME\s+TABLE\b", stmt_clean
+            ):
                 type_counts["RENAME"] += 1
-        
+
         # 총 구문 수
         total_statements = sum(type_counts.values())
-        
+
         # 디버그 로그 추가
         if debug_log:
             debug_log(f"DEBUG - 구문 개수: {type_counts}")
             debug_log(f"DEBUG - 총 구문: {total_statements}")
-        
+
         # SELECT 쿼리가 50% 이상이면 MIXED_SELECT로 분류
-        if type_counts["SELECT"] > 0 and type_counts["SELECT"] >= total_statements * 0.5:
+        if (
+            type_counts["SELECT"] > 0
+            and type_counts["SELECT"] >= total_statements * 0.5
+        ):
             if debug_log:
                 debug_log("DEBUG - MIXED_SELECT로 분류됨")
             return "MIXED_SELECT"
-        
+
         # 기존 우선순위 로직 (DDL 우선)
         if type_counts["CREATE_TABLE"] > 0:
             return "CREATE_TABLE"
@@ -2318,7 +2389,7 @@ class DBAssistantMCPServer:
             return "UPDATE"
         elif type_counts["DELETE"] > 0:
             return "DELETE"
-        
+
         # 기타 구문 처리
         if any(stmt.startswith("SHOW ") for stmt in statements):
             return "SHOW"
@@ -2720,6 +2791,529 @@ Knowledge Base 참고 정보:
             except Exception as e:
                 logger.error(f"Claude 3.7 Sonnet 호출 오류: {e}")
                 return f"Claude 호출 중 오류 발생: {str(e)}"
+
+    async def generate_performance_recommendations_with_claude(
+        self,
+        metrics_summary: str,
+        correlation_analysis: str,
+        outliers_analysis: str,
+        slow_queries: str,
+        memory_queries: str,
+        cpu_queries: str,
+        temp_queries: str,
+        database_secret: str = None,
+    ) -> Dict[str, Any]:
+        """
+        Claude를 활용하여 성능 메트릭과 쿼리 분석을 기반으로 동적 권장사항 생성
+        """
+        try:
+            # Knowledge Base에서 성능 최적화 가이드 조회
+            knowledge_context = ""
+            try:
+                knowledge_info = await self.query_knowledge_base(
+                    "database performance optimization recommendations", "PERFORMANCE"
+                )
+                if knowledge_info and knowledge_info != "관련 정보를 찾을 수 없습니다.":
+                    knowledge_context = f"""
+Knowledge Base 성능 최적화 가이드:
+{knowledge_info}
+
+위 가이드를 참고하여 권장사항을 생성해주세요.
+"""
+            except Exception as e:
+                logger.warning(f"Knowledge Base 조회 중 오류: {e}")
+
+            prompt = f"""
+다음 데이터베이스 성능 분석 결과를 바탕으로 구체적이고 실행 가능한 최적화 권장사항과 액션 아이템을 생성해주세요:
+
+**메트릭 요약:**
+{metrics_summary}
+
+**상관관계 분석:**
+{correlation_analysis}
+
+**이상 징후 분석:**
+{outliers_analysis}
+
+**느린 쿼리 분석:**
+{slow_queries}
+
+**메모리 집약적 쿼리:**
+{memory_queries}
+
+**CPU 집약적 쿼리:**
+{cpu_queries}
+
+**임시 공간 집약적 쿼리:**
+{temp_queries}
+
+{knowledge_context}
+
+**요구사항:**
+1. 위 분석 결과를 종합하여 실제 데이터에 기반한 구체적인 권장사항을 제시하세요
+2. 우선순위별로 분류하여 즉시 적용 가능한 개선사항을 제안하세요
+3. 각 권장사항에 대해 예상 효과와 구현 난이도를 포함하세요
+4. 액션 아이템은 담당자, 예상 소요시간, 우선순위를 포함하여 구체적으로 작성하세요
+
+**응답 형식 (JSON):**
+{{
+    "immediate_improvements": [
+        {{
+            "category": "모니터링/성능/용량계획",
+            "title": "구체적인 개선사항 제목",
+            "description": "상세 설명",
+            "items": ["구체적인 실행 항목1", "구체적인 실행 항목2"],
+            "expected_impact": "예상 효과",
+            "difficulty": "낮음/중간/높음"
+        }}
+    ],
+    "action_items": [
+        {{
+            "priority": "높음/중간/낮음",
+            "item": "구체적인 액션 아이템",
+            "estimated_time": "예상 소요시간",
+            "assignee": "담당자 역할",
+            "rationale": "이 액션이 필요한 이유"
+        }}
+    ]
+}}
+
+반드시 위 JSON 형식으로만 응답하세요. 분석 결과에서 실제 발견된 문제점을 기반으로 구체적인 권장사항을 제시하세요.
+"""
+
+            claude_input = json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4096,
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                    ],
+                    "temperature": 0.3,
+                }
+            )
+
+            sonnet_4_model_id = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+            sonnet_3_7_model_id = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+
+            # Claude Sonnet 4 호출
+            try:
+                logger.info(f"Claude Sonnet 4 호출 시작 - 모델ID: {sonnet_4_model_id}")
+                logger.debug(f"입력 데이터 크기: {len(claude_input)} bytes")
+                
+                response = self.bedrock_client.invoke_model(
+                    modelId=sonnet_4_model_id, body=claude_input
+                )
+                logger.info("Claude Sonnet 4 응답 수신 완료")
+                
+                response_body = json.loads(response.get("body").read())
+                logger.debug(f"응답 본문 파싱 완료: {list(response_body.keys())}")
+                
+                claude_response = response_body.get("content", [{}])[0].get("text", "")
+                logger.info(f"Claude 응답 텍스트 길이: {len(claude_response)} characters")
+                logger.debug(f"Claude 응답 미리보기: {claude_response[:200]}...")
+                
+                # JSON 파싱 시도 - 먼저 마크다운 코드 블록 확인
+                try:
+                    # 마크다운 코드 블록에서 JSON 추출 시도
+                    import re
+                    markdown_pattern = r'```(?:json)?\s*(.*?)\s*```'
+                    markdown_match = re.search(markdown_pattern, claude_response, re.DOTALL | re.IGNORECASE)
+                    
+                    if markdown_match:
+                        json_content = markdown_match.group(1).strip()
+                        logger.info(f"마크다운 블록에서 JSON 추출, 길이: {len(json_content)}")
+                        parsed_result = json.loads(json_content)
+                    else:
+                        # 마크다운 블록이 없으면 직접 파싱 시도
+                        logger.info("마크다운 블록 없음, 직접 JSON 파싱 시도")
+                        parsed_result = json.loads(claude_response)
+                    
+                    logger.info("Claude 응답 JSON 파싱 성공")
+                    logger.debug(f"파싱된 결과 키: {list(parsed_result.keys())}")
+                    
+                    # 필요한 키가 있는지 확인
+                    if isinstance(parsed_result, dict) and ('immediate_improvements' in parsed_result or 'action_items' in parsed_result):
+                        improvements_count = len(parsed_result.get('immediate_improvements', []))
+                        actions_count = len(parsed_result.get('action_items', []))
+                        logger.info(f"유효한 권장사항 파싱 완료: {improvements_count}개 개선사항, {actions_count}개 액션아이템")
+                        return parsed_result
+                    else:
+                        logger.warning("파싱된 JSON에 필요한 키가 없음")
+                        return self._get_default_recommendations()
+                        
+                except json.JSONDecodeError as json_err:
+                    logger.error(f"Claude Sonnet 4 응답 JSON 파싱 실패: {json_err}")
+                    logger.info("텍스트 파싱 시도")
+                    # 텍스트에서 JSON 추출 시도
+                    parsed_result = self._parse_claude_text_response(claude_response)
+                    if parsed_result:
+                        logger.info("텍스트 파싱 성공")
+                        return parsed_result
+                    logger.error(f"파싱 실패한 응답 내용: {claude_response}")
+                    return self._get_default_recommendations()
+                    
+            except Exception as e:
+                logger.error(f"Claude Sonnet 4 호출 실패 - 에러 타입: {type(e).__name__}")
+                logger.error(f"Claude Sonnet 4 호출 실패 - 에러 메시지: {str(e)}")
+                if hasattr(e, 'response'):
+                    logger.error(f"AWS 응답 코드: {e.response.get('Error', {}).get('Code', 'Unknown')}")
+                    logger.error(f"AWS 응답 메시지: {e.response.get('Error', {}).get('Message', 'Unknown')}")
+                
+                # Claude 3.7 Sonnet 호출 (fallback)
+                try:
+                    logger.info(f"Claude 3.7 Sonnet fallback 시작 - 모델ID: {sonnet_3_7_model_id}")
+                    
+                    response = self.bedrock_client.invoke_model(
+                        modelId=sonnet_3_7_model_id, body=claude_input
+                    )
+                    logger.info("Claude 3.7 Sonnet 응답 수신 완료")
+                    
+                    response_body = json.loads(response.get("body").read())
+                    claude_response = response_body.get("content", [{}])[0].get("text", "")
+                    logger.info(f"Claude 3.7 응답 텍스트 길이: {len(claude_response)} characters")
+                    
+                    try:
+                        # 마크다운 코드 블록에서 JSON 추출 시도
+                        import re
+                        markdown_pattern = r'```(?:json)?\s*(.*?)\s*```'
+                        markdown_match = re.search(markdown_pattern, claude_response, re.DOTALL | re.IGNORECASE)
+                        
+                        if markdown_match:
+                            json_content = markdown_match.group(1).strip()
+                            logger.info(f"Claude 3.7 마크다운 블록에서 JSON 추출, 길이: {len(json_content)}")
+                            parsed_result = json.loads(json_content)
+                        else:
+                            # 마크다운 블록이 없으면 직접 파싱 시도
+                            logger.info("Claude 3.7 마크다운 블록 없음, 직접 JSON 파싱 시도")
+                            parsed_result = json.loads(claude_response)
+                        
+                        logger.info("Claude 3.7 응답 JSON 파싱 성공")
+                        
+                        # 필요한 키가 있는지 확인
+                        if isinstance(parsed_result, dict) and ('immediate_improvements' in parsed_result or 'action_items' in parsed_result):
+                            improvements_count = len(parsed_result.get('immediate_improvements', []))
+                            actions_count = len(parsed_result.get('action_items', []))
+                            logger.info(f"Claude 3.7 유효한 권장사항 파싱 완료: {improvements_count}개 개선사항, {actions_count}개 액션아이템")
+                            return parsed_result
+                        else:
+                            logger.warning("Claude 3.7 파싱된 JSON에 필요한 키가 없음")
+                            return self._get_default_recommendations()
+                            
+                    except json.JSONDecodeError as json_err:
+                        logger.error(f"Claude 3.7 응답 JSON 파싱 실패: {json_err}")
+                        logger.info("Claude 3.7 텍스트 파싱 시도")
+                        # 텍스트에서 JSON 추출 시도
+                        parsed_result = self._parse_claude_text_response(claude_response)
+                        if parsed_result:
+                            logger.info("Claude 3.7 텍스트 파싱 성공")
+                            return parsed_result
+                        logger.error(f"파싱 실패한 응답 내용: {claude_response}")
+                        return self._get_default_recommendations()
+                        
+                except Exception as fallback_e:
+                    logger.error(f"Claude 3.7 Sonnet fallback 실패 - 에러 타입: {type(fallback_e).__name__}")
+                    logger.error(f"Claude 3.7 Sonnet fallback 실패 - 에러 메시지: {str(fallback_e)}")
+                    if hasattr(fallback_e, 'response'):
+                        logger.error(f"AWS fallback 응답 코드: {fallback_e.response.get('Error', {}).get('Code', 'Unknown')}")
+                        logger.error(f"AWS fallback 응답 메시지: {fallback_e.response.get('Error', {}).get('Message', 'Unknown')}")
+                    return self._get_default_recommendations()
+
+        except Exception as e:
+            logger.error(f"성능 권장사항 생성 중 전체 오류 - 에러 타입: {type(e).__name__}")
+            logger.error(f"성능 권장사항 생성 중 전체 오류 - 에러 메시지: {str(e)}")
+            logger.error(f"성능 권장사항 생성 중 전체 오류 - 스택 트레이스:", exc_info=True)
+            return self._get_default_recommendations()
+
+    def _parse_claude_text_response(self, text_response: str) -> Optional[Dict[str, Any]]:
+        """Claude 텍스트 응답에서 JSON 추출 및 파싱"""
+        try:
+            import re
+            
+            logger.info(f"Claude 응답 파싱 시작, 응답 길이: {len(text_response)}")
+            logger.debug(f"응답 시작 부분: {text_response[:200]}")
+            
+            # 먼저 마크다운 코드 블록에서 JSON 추출
+            markdown_pattern = r'```(?:json)?\s*(.*?)\s*```'
+            markdown_match = re.search(markdown_pattern, text_response, re.DOTALL | re.IGNORECASE)
+            
+            if markdown_match:
+                json_content = markdown_match.group(1).strip()
+                logger.info(f"마크다운 블록에서 JSON 추출 성공, 길이: {len(json_content)}")
+                logger.debug(f"추출된 JSON 시작 부분: {json_content[:200]}")
+                try:
+                    parsed = json.loads(json_content)
+                    if isinstance(parsed, dict) and ('immediate_improvements' in parsed or 'action_items' in parsed):
+                        logger.info(f"마크다운 블록 JSON 파싱 성공 - 개선사항: {len(parsed.get('immediate_improvements', []))}개, 액션아이템: {len(parsed.get('action_items', []))}개")
+                        return parsed
+                    else:
+                        logger.warning("파싱된 JSON에 필요한 키가 없음")
+                except json.JSONDecodeError as e:
+                    logger.error(f"마크다운 블록 JSON 파싱 실패: {e}")
+                    logger.debug(f"파싱 실패한 JSON 내용 (처음 500자): {json_content[:500]}")
+            else:
+                logger.warning("마크다운 코드 블록을 찾을 수 없음")
+            
+            # 마크다운 블록이 없거나 파싱 실패시 다른 패턴들 시도
+            logger.info("대체 JSON 패턴 매칭 시도")
+            json_patterns = [
+                r'(\{[^{}]*"immediate_improvements"[^{}]*\})',
+                r'(\{.*?"immediate_improvements".*?\})',
+                r'(\{.*?"action_items".*?\})',
+                r'(\{.*?\})'
+            ]
+            
+            for i, pattern in enumerate(json_patterns):
+                logger.debug(f"패턴 {i+1} 시도: {pattern}")
+                matches = re.findall(pattern, text_response, re.DOTALL | re.IGNORECASE)
+                logger.debug(f"패턴 {i+1}에서 {len(matches)}개 매치 발견")
+                for j, match in enumerate(matches):
+                    try:
+                        parsed = json.loads(match)
+                        if isinstance(parsed, dict) and ('immediate_improvements' in parsed or 'action_items' in parsed):
+                            logger.info(f"JSON 패턴 매칭 성공: 패턴 {i+1}, 매치 {j+1}")
+                            return parsed
+                    except json.JSONDecodeError as e:
+                        logger.debug(f"패턴 {i+1}, 매치 {j+1} JSON 파싱 실패: {e}")
+                        continue
+            
+            # 구조화된 텍스트에서 정보 추출
+            logger.info("구조화된 텍스트 파싱 시도")
+            return self._extract_from_structured_text(text_response)
+            
+        except Exception as e:
+            logger.error(f"텍스트 파싱 중 오류: {e}")
+            return None
+
+    def _extract_from_structured_text(self, text: str) -> Optional[Dict[str, Any]]:
+        """구조화된 텍스트에서 권장사항 추출"""
+        try:
+            import re
+            
+            result = {
+                "immediate_improvements": [],
+                "action_items": []
+            }
+            
+            # 개선사항 섹션 찾기
+            improvements_pattern = r'"immediate_improvements":\s*\[(.*?)\]'
+            improvements_match = re.search(improvements_pattern, text, re.DOTALL)
+            
+            if improvements_match:
+                improvements_text = improvements_match.group(1)
+                # 각 개선사항 파싱
+                item_pattern = r'\{([^{}]+)\}'
+                for item_match in re.finditer(item_pattern, improvements_text):
+                    item_text = item_match.group(1)
+                    improvement = self._parse_improvement_item(item_text)
+                    if improvement:
+                        result["immediate_improvements"].append(improvement)
+            
+            # 액션 아이템 섹션 찾기
+            actions_pattern = r'"action_items":\s*\[(.*?)\]'
+            actions_match = re.search(actions_pattern, text, re.DOTALL)
+            
+            if actions_match:
+                actions_text = actions_match.group(1)
+                # 각 액션 아이템 파싱
+                for item_match in re.finditer(item_pattern, actions_text):
+                    item_text = item_match.group(1)
+                    action = self._parse_action_item(item_text)
+                    if action:
+                        result["action_items"].append(action)
+            
+            if result["immediate_improvements"] or result["action_items"]:
+                return result
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"구조화된 텍스트 추출 중 오류: {e}")
+            return None
+
+    def _parse_improvement_item(self, item_text: str) -> Optional[Dict[str, Any]]:
+        """개선사항 아이템 파싱"""
+        try:
+            import re
+            
+            improvement = {}
+            
+            # 각 필드 추출
+            fields = {
+                'category': r'"category":\s*"([^"]+)"',
+                'title': r'"title":\s*"([^"]+)"', 
+                'description': r'"description":\s*"([^"]+)"',
+                'expected_impact': r'"expected_impact":\s*"([^"]+)"',
+                'difficulty': r'"difficulty":\s*"([^"]+)"'
+            }
+            
+            for field, pattern in fields.items():
+                match = re.search(pattern, item_text)
+                if match:
+                    improvement[field] = match.group(1)
+            
+            # items 배열 추출
+            items_pattern = r'"items":\s*\[(.*?)\]'
+            items_match = re.search(items_pattern, item_text, re.DOTALL)
+            if items_match:
+                items_text = items_match.group(1)
+                items = re.findall(r'"([^"]+)"', items_text)
+                improvement['items'] = items
+            
+            return improvement if improvement else None
+            
+        except Exception as e:
+            logger.error(f"개선사항 파싱 중 오류: {e}")
+            return None
+
+    def _parse_action_item(self, item_text: str) -> Optional[Dict[str, Any]]:
+        """액션 아이템 파싱"""
+        try:
+            import re
+            
+            action = {}
+            
+            # 각 필드 추출
+            fields = {
+                'priority': r'"priority":\s*"([^"]+)"',
+                'item': r'"item":\s*"([^"]+)"',
+                'estimated_time': r'"estimated_time":\s*"([^"]+)"',
+                'assignee': r'"assignee":\s*"([^"]+)"',
+                'rationale': r'"rationale":\s*"([^"]+)"'
+            }
+            
+            for field, pattern in fields.items():
+                match = re.search(pattern, item_text)
+                if match:
+                    action[field] = match.group(1)
+            
+            return action if action else None
+            
+        except Exception as e:
+            logger.error(f"액션 아이템 파싱 중 오류: {e}")
+            return None
+
+    def _generate_recommendations_html(self, recommendations: Dict[str, Any]) -> str:
+        """Claude 권장사항을 HTML로 변환"""
+        try:
+            html_parts = []
+            
+            # 즉시 적용 가능한 개선사항
+            html_parts.append('<h4>🚀 즉시 적용 가능한 개선사항</h4>')
+            
+            improvements = recommendations.get("immediate_improvements", [])
+            if not improvements:
+                html_parts.append('<div class="info-box">현재 분석된 데이터에서는 즉시 적용 가능한 개선사항이 발견되지 않았습니다.</div>')
+            else:
+                for improvement in improvements:
+                    category = improvement.get("category", "기타")
+                    title = improvement.get("title", "개선사항")
+                    description = improvement.get("description", "")
+                    items = improvement.get("items", [])
+                    expected_impact = improvement.get("expected_impact", "")
+                    difficulty = improvement.get("difficulty", "중간")
+                    
+                    html_parts.append(f'''
+                    <div class="recommendation">
+                        <strong>{category}: {title}</strong>
+                        <p style="margin: 10px 0; color: #666;">{description}</p>
+                        <ul style="margin-top: 10px; margin-left: 20px;">
+                    ''')
+                    
+                    for item in items:
+                        html_parts.append(f'<li>{item}</li>')
+                    
+                    html_parts.append(f'''
+                        </ul>
+                        <div style="margin-top: 10px; font-size: 0.9em;">
+                            <span style="color: #27ae60;"><strong>예상 효과:</strong> {expected_impact}</span> | 
+                            <span style="color: #3498db;"><strong>구현 난이도:</strong> {difficulty}</span>
+                        </div>
+                    </div>
+                    ''')
+            
+            # 액션 아이템 테이블
+            html_parts.append('<h4>📋 액션 아이템</h4>')
+            
+            actions = recommendations.get("action_items", [])
+            if not actions:
+                html_parts.append('<div class="info-box">현재 분석된 데이터에서는 특별한 액션 아이템이 필요하지 않습니다.</div>')
+            else:
+                html_parts.append('''
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>우선순위</th>
+                                <th>항목</th>
+                                <th>예상 소요시간</th>
+                                <th>담당자</th>
+                                <th>근거</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                ''')
+                
+                for action in actions:
+                    priority = action.get("priority", "중간")
+                    item = action.get("item", "액션 아이템")
+                    estimated_time = action.get("estimated_time", "미정")
+                    assignee = action.get("assignee", "담당자")
+                    rationale = action.get("rationale", "")
+                    
+                    # 우선순위에 따른 스타일 클래스
+                    priority_class = {
+                        "높음": "status-critical",
+                        "중간": "status-warning", 
+                        "낮음": "status-good"
+                    }.get(priority, "status-warning")
+                    
+                    html_parts.append(f'''
+                            <tr>
+                                <td><span class="{priority_class}">{priority}</span></td>
+                                <td>{item}</td>
+                                <td>{estimated_time}</td>
+                                <td>{assignee}</td>
+                                <td style="font-size: 0.9em; color: #666;">{rationale}</td>
+                            </tr>
+                    ''')
+                
+                html_parts.append('''
+                        </tbody>
+                    </table>
+                ''')
+            
+            return ''.join(html_parts)
+            
+        except Exception as e:
+            logger.error(f"HTML 권장사항 생성 중 오류: {e}")
+            return f'<div class="issue">권장사항 생성 중 오류가 발생했습니다: {str(e)}</div>'
+
+    def _get_default_recommendations(self) -> Dict[str, Any]:
+        """Claude 호출 실패 시 기본 권장사항 반환"""
+        return {
+            "immediate_improvements": [
+                {
+                    "category": "모니터링",
+                    "title": "기본 모니터링 강화",
+                    "description": "기본적인 성능 모니터링 체계 구축",
+                    "items": [
+                        "CloudWatch 알람 설정",
+                        "Performance Insights 활성화",
+                        "슬로우 쿼리 로그 정기 분석"
+                    ],
+                    "expected_impact": "성능 문제 조기 발견",
+                    "difficulty": "낮음"
+                }
+            ],
+            "action_items": [
+                {
+                    "priority": "높음",
+                    "item": "CloudWatch 알람 설정",
+                    "estimated_time": "1일",
+                    "assignee": "DBA",
+                    "rationale": "성능 문제 조기 감지를 위해 필요"
+                }
+            ]
+        }
 
     async def extract_current_schema_info(
         self, database_secret: str, use_ssh_tunnel: bool = True
@@ -5075,33 +5669,33 @@ Knowledge Base 참고 정보:
             try:
                 with open(report_path, "r", encoding="utf-8") as f:
                     html_content = f.read()
-                
+
                 # 검증 결과 섹션 제거 - 더 정확한 방법
-                lines = html_content.split('\n')
+                lines = html_content.split("\n")
                 new_lines = []
                 i = 0
-                
+
                 while i < len(lines):
                     line = lines[i]
-                    
+
                     # 검증 결과 섹션 시작 감지
                     if '<div class="info-section" style="display: none;">' in line:
                         # 다음 라인들을 확인하여 검증 결과 섹션인지 판단
-                        if i + 1 < len(lines) and '📊 검증 결과' in lines[i + 1]:
+                        if i + 1 < len(lines) and "📊 검증 결과" in lines[i + 1]:
                             # 검증 결과 섹션이므로 </div>까지 스킵
                             i += 1  # 현재 div 라인 스킵
                             while i < len(lines):
-                                if '</div>' in lines[i]:
+                                if "</div>" in lines[i]:
                                     i += 1  # </div> 라인도 스킵
                                     break
                                 i += 1
                             continue
-                    
+
                     new_lines.append(line)
                     i += 1
-                
-                html_content = '\n'.join(new_lines)
-                
+
+                html_content = "\n".join(new_lines)
+
                 with open(report_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
             except Exception as e:
@@ -5391,33 +5985,38 @@ Knowledge Base 참고 정보:
             return f"보고서 생성 실패: {str(e)}"
 
     async def generate_consolidated_report(
-        self, keyword: Optional[str] = None, report_files: Optional[List[str]] = None, 
-        date_filter: Optional[str] = None, latest_count: Optional[int] = None
+        self,
+        keyword: Optional[str] = None,
+        report_files: Optional[List[str]] = None,
+        date_filter: Optional[str] = None,
+        latest_count: Optional[int] = None,
     ) -> str:
         """기존 HTML 보고서들을 기반으로 통합 보고서 생성"""
         try:
             # 보고서 파일 수집
             if report_files:
                 # 특정 파일들 지정된 경우
-                html_files = [OUTPUT_DIR / f for f in report_files if (OUTPUT_DIR / f).exists()]
+                html_files = [
+                    OUTPUT_DIR / f for f in report_files if (OUTPUT_DIR / f).exists()
+                ]
             else:
                 # validation_report로 시작하는 HTML 파일만 (debug_log 제외)
                 html_files = list(OUTPUT_DIR.glob("validation_report_*.html"))
-                
+
                 # 키워드 필터링
                 if keyword:
                     html_files = [f for f in html_files if keyword in f.name]
-                
+
                 # 날짜 필터링 (YYYYMMDD 형식)
                 if date_filter:
                     html_files = [f for f in html_files if date_filter in f.name]
-                
+
                 # 최신 파일 개수 제한
                 if latest_count:
                     # 파일명의 타임스탬프로 정렬 (최신순)
                     html_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                     html_files = html_files[:latest_count]
-            
+
             if not html_files:
                 return f"조건에 맞는 HTML 보고서를 찾을 수 없습니다. (키워드: {keyword}, 날짜: {date_filter}, 개수: {latest_count})"
 
@@ -5425,47 +6024,62 @@ Knowledge Base 참고 정보:
             report_data = []
             for html_file in html_files:
                 try:
-                    content = html_file.read_text(encoding='utf-8')
-                    
+                    content = html_file.read_text(encoding="utf-8")
+
                     # 파일명에서 원본 SQL 파일명 추출
-                    sql_filename = html_file.name.replace('validation_report_', '').replace('.html', '')
-                    if '_2025' in sql_filename:
-                        sql_filename = sql_filename.split('_2025')[0] + '.sql'
-                    
+                    sql_filename = html_file.name.replace(
+                        "validation_report_", ""
+                    ).replace(".html", "")
+                    if "_2025" in sql_filename:
+                        sql_filename = sql_filename.split("_2025")[0] + ".sql"
+
                     # 검증 결과 추출 - HTML 구조 기반으로 정확히 추출
-                    if 'status-badge">PASS' in content or '✅ SQL 검증보고서' in content:
-                        status = 'PASS'
-                        status_icon = '✅'
-                    elif 'status-badge">FAIL' in content or '❌ SQL 검증보고서' in content:
-                        status = 'FAIL'
-                        status_icon = '❌'
+                    if (
+                        'status-badge">PASS' in content
+                        or "✅ SQL 검증보고서" in content
+                    ):
+                        status = "PASS"
+                        status_icon = "✅"
+                    elif (
+                        'status-badge">FAIL' in content
+                        or "❌ SQL 검증보고서" in content
+                    ):
+                        status = "FAIL"
+                        status_icon = "❌"
                     else:
                         # 기본값으로 FAIL 처리
-                        status = 'FAIL'
-                        status_icon = '❌'
-                    
+                        status = "FAIL"
+                        status_icon = "❌"
+
                     # SQL 내용 일부 추출 (HTML 파일에서만)
                     sql_preview = "SQL 내용을 찾을 수 없습니다"
-                    if 'sql-code' in content:
+                    if "sql-code" in content:
                         import re
-                        sql_match = re.search(r'<div class="sql-code"[^>]*>(.*?)</div>', content, re.DOTALL)
+
+                        sql_match = re.search(
+                            r'<div class="sql-code"[^>]*>(.*?)</div>',
+                            content,
+                            re.DOTALL,
+                        )
                         if sql_match:
                             sql_preview = sql_match.group(1).strip()[:100] + "..."
-                    
+
                     # 요약 정보 추출
                     summary = "상세 내용은 개별 보고서 참조"
-                    if 'Claude AI 분석' in content:
+                    if "Claude AI 분석" in content:
                         summary = "AI 분석 완료"
-                    
-                    report_data.append({
-                        'filename': sql_filename,
-                        'html_file': html_file.name,
-                        'status': status,
-                        'status_icon': status_icon,
-                        'sql_preview': sql_preview,
-                        'summary': summary
-                    })
-                    
+
+                    report_data.append(
+                        {
+                            "filename": sql_filename,
+                            "html_file": html_file.name,
+                            "status": status,
+                            "status_icon": status_icon,
+                            "sql_preview": sql_preview,
+                            "summary": summary,
+                        }
+                    )
+
                 except Exception as e:
                     logger.error(f"보고서 파싱 오류 {html_file}: {e}")
                     continue
@@ -5480,7 +6094,7 @@ Knowledge Base 참고 정보:
 
             # 통계 계산
             total_reports = len(report_data)
-            passed_reports = sum(1 for r in report_data if r['status'] == 'PASS')
+            passed_reports = sum(1 for r in report_data if r["status"] == "PASS")
             failed_reports = total_reports - passed_reports
 
             # 테이블 행 생성
@@ -5575,8 +6189,8 @@ Knowledge Base 참고 정보:
 </body>
 </html>"""
 
-            report_path.write_text(html_content, encoding='utf-8')
-            
+            report_path.write_text(html_content, encoding="utf-8")
+
             return f"""📊 통합 보고서 생성 완료
 
 📈 요약:
@@ -5592,47 +6206,98 @@ Knowledge Base 참고 정보:
             return f"통합 보고서 생성 실패: {str(e)}"
 
     async def generate_comprehensive_performance_report(
-        self, database_secret: str, db_instance_identifier: str, 
-        region: str = "ap-northeast-2", hours: int = 24
+        self,
+        database_secret: str,
+        db_instance_identifier: str,
+        region: Optional[str] = None,
+        hours: int = 24,
     ) -> str:
-        """Oracle AWR 스타일의 종합 성능 진단 보고서 생성"""
+        """종합 성능 진단 보고서 생성"""
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # region이 제공되지 않으면 현재 프로파일의 기본 리전 사용
+            if region is None:
+                region = self.default_region
             
+            # 클러스터 엔드포인트 확인 및 인스턴스 identifier 변환
+            original_identifier = db_instance_identifier
+            try:
+                rds_client = boto3.client('rds', region_name=region)
+                cluster_response = rds_client.describe_db_clusters(
+                    DBClusterIdentifier=db_instance_identifier
+                )
+                if cluster_response['DBClusters']:
+                    cluster = cluster_response['DBClusters'][0]
+                    endpoint = cluster.get('Endpoint', '')
+                    if '.cluster.' in endpoint and cluster['DBClusterMembers']:
+                        # 첫 번째 인스턴스 사용 (보통 writer 인스턴스)
+                        db_instance_identifier = cluster['DBClusterMembers'][0]['DBInstanceIdentifier']
+                        logger.info(f"클러스터 {original_identifier}에서 인스턴스 {db_instance_identifier}로 변환")
+            except rds_client.exceptions.DBClusterNotFoundFault:
+                logger.debug(f"{original_identifier}는 인스턴스 ID입니다")
+            except Exception as e:
+                logger.debug(f"클러스터 확인 실패: {str(e)}")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
             # 1. 메트릭 수집
-            metrics_result = await self.collect_db_metrics(db_instance_identifier, hours, None, region)
+            metrics_result = await self.collect_db_metrics(
+                db_instance_identifier, hours, None, region
+            )
             if "오류" in metrics_result:
                 return f"❌ 메트릭 수집 실패: {metrics_result}"
-            
+
             # CSV 파일명 추출
             csv_file = None
-            for line in metrics_result.split('\n'):
-                if 'database_metrics_' in line and '.csv' in line:
-                    csv_file = line.split(': ')[-1]
+            for line in metrics_result.split("\n"):
+                if "database_metrics_" in line and ".csv" in line:
+                    csv_file = line.split(": ")[-1]
                     break
-            
+
             if not csv_file:
                 return "❌ 메트릭 CSV 파일을 찾을 수 없습니다"
-            
+
             csv_filename = Path(csv_file).name
-            
+
             # 2. 성능 쿼리 수집
             slow_queries = await self.collect_slow_queries(database_secret)
-            memory_queries = await self.collect_memory_intensive_queries(database_secret)
+            memory_queries = await self.collect_memory_intensive_queries(
+                database_secret
+            )
             cpu_queries = await self.collect_cpu_intensive_queries(database_secret)
-            temp_queries = await self.collect_temp_space_intensive_queries(database_secret)
-            
+            temp_queries = await self.collect_temp_space_intensive_queries(
+                database_secret
+            )
+
             # 3. 메트릭 분석
             summary = await self.get_metric_summary(csv_filename)
-            correlation = await self.analyze_metric_correlation(csv_filename, "CPUUtilization", 10)
+            correlation = await self.analyze_metric_correlation(
+                csv_filename, "CPUUtilization", 10
+            )
             outliers = await self.detect_metric_outliers(csv_filename, 2.0)
-            
+
             # 4. 상관관계 분석 (기존 함수 사용)
-            correlation_analysis = await self.analyze_metric_correlation(csv_filename, "CPUUtilization", 10)
-            
-            # 5. HTML 보고서 생성
-            report_path = OUTPUT_DIR / f"comprehensive_performance_report_{db_instance_identifier}_{timestamp}.html"
-            
+            correlation_analysis = await self.analyze_metric_correlation(
+                csv_filename, "CPUUtilization", 10
+            )
+
+            # 5. Claude 기반 성능 권장사항 생성
+            logger.info("Claude 기반 성능 권장사항 생성 시작")
+            try:
+                claude_recommendations = await self.generate_performance_recommendations_with_claude(
+                    summary, correlation_analysis, outliers, slow_queries, 
+                    memory_queries, cpu_queries, temp_queries, database_secret
+                )
+                logger.info(f"Claude 권장사항 생성 완료: {len(claude_recommendations.get('immediate_improvements', []))}개 개선사항, {len(claude_recommendations.get('action_items', []))}개 액션아이템")
+            except Exception as e:
+                logger.error(f"Claude 권장사항 생성 실패, 기본 권장사항 사용: {e}")
+                claude_recommendations = self._get_default_recommendations()
+
+            # 6. HTML 보고서 생성
+            report_path = (
+                OUTPUT_DIR
+                / f"comprehensive_performance_report_{db_instance_identifier}_{timestamp}.html"
+            )
+
             html_content = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -5686,7 +6351,7 @@ Knowledge Base 참고 정보:
     <div class="container">
         <div class="header">
             <h1>🗄️ 종합 성능 진단 보고서</h1>
-            <div class="subtitle">Oracle AWR 스타일 데이터베이스 성능 분석</div>
+            <div class="subtitle">데이터베이스 성능 분석</div>
             <div style="margin-top: 15px; font-size: 1em;">
                 <strong>인스턴스:</strong> {db_instance_identifier} | 
                 <strong>리전:</strong> {region} | 
@@ -5777,13 +6442,13 @@ Knowledge Base 참고 정보:
         </div>
 
         <div class="section" id="slow-queries">
-            <div class="section-header">🐌 5. 느린 쿼리 분석 (Slow Query Analysis)</div>
+            <div class="section-header">🐌 5. Slow 쿼리 분석 (Slow Query Analysis)</div>
             <div class="section-content">
                 <h4>📊 수집 결과</h4>
                 <div class="query-box">{slow_queries}</div>
                 
                 <div class="recommendation">
-                    <strong>💡 느린 쿼리 최적화 가이드:</strong>
+                    <strong>💡 Slow 쿼리 최적화 가이드:</strong>
                     <ul style="margin-top: 10px; margin-left: 20px;">
                         <li>인덱스 추가 또는 기존 인덱스 최적화</li>
                         <li>WHERE 절 조건 순서 최적화</li>
@@ -5795,15 +6460,15 @@ Knowledge Base 참고 정보:
         </div>
 
         <div class="section" id="resource-intensive">
-            <div class="section-header">💾 6. 리소스 집약적 쿼리 분석</div>
+            <div class="section-header">💾 6. 리소스 소모가 큰 쿼리 분석</div>
             <div class="section-content">
-                <h4>🧠 메모리 집약적 쿼리</h4>
+                <h4>🧠 메모리 소비가 많은 쿼리</h4>
                 <div class="query-box">{memory_queries}</div>
                 
-                <h4>⚡ CPU 집약적 쿼리</h4>
+                <h4>⚡ CPU 소비가 많은 쿼리</h4>
                 <div class="query-box">{cpu_queries}</div>
                 
-                <h4>💿 임시 공간 집약적 쿼리</h4>
+                <h4>💿 임시 공간을 많이 소비하는 쿼리</h4>
                 <div class="query-box">{temp_queries}</div>
                 
                 <div class="recommendation">
@@ -5820,71 +6485,10 @@ Knowledge Base 참고 정보:
         <div class="section" id="recommendations">
             <div class="section-header">🎯 7. 최적화 권장사항</div>
             <div class="section-content">
-                <h4>🚀 즉시 적용 가능한 개선사항</h4>
-                <div class="recommendation">
-                    <strong>1. 모니터링 강화</strong>
-                    <ul style="margin-top: 10px; margin-left: 20px;">
-                        <li>CloudWatch 알람 설정 (CPU > 70%, 연결 수 급증)</li>
-                        <li>Performance Insights 활성화</li>
-                        <li>슬로우 쿼리 로그 정기 분석</li>
-                    </ul>
+                <div class="info-box" style="margin-bottom: 20px;">
+                    <strong>🤖 AI 기반 분석:</strong> 이 권장사항들은 Claude AI가 실제 성능 메트릭, 상관관계 분석, 느린 쿼리 데이터를 종합 분석하여 생성한 맞춤형 제안입니다.
                 </div>
-                
-                <div class="recommendation">
-                    <strong>2. 성능 최적화</strong>
-                    <ul style="margin-top: 10px; margin-left: 20px;">
-                        <li>인덱스 최적화 (느린 쿼리 기반)</li>
-                        <li>연결 풀 크기 조정</li>
-                        <li>쿼리 캐시 설정 검토</li>
-                    </ul>
-                </div>
-                
-                <div class="recommendation">
-                    <strong>3. 용량 계획</strong>
-                    <ul style="margin-top: 10px; margin-left: 20px;">
-                        <li>리소스 사용률 기반 스케일링 계획</li>
-                        <li>백업 및 유지보수 윈도우 최적화</li>
-                        <li>정기적인 성능 리뷰 프로세스 수립</li>
-                    </ul>
-                </div>
-                
-                <h4>📋 액션 아이템</h4>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>우선순위</th>
-                            <th>항목</th>
-                            <th>예상 소요시간</th>
-                            <th>담당자</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><span class="status-critical">높음</span></td>
-                            <td>CloudWatch 알람 설정</td>
-                            <td>1일</td>
-                            <td>DBA</td>
-                        </tr>
-                        <tr>
-                            <td><span class="status-critical">높음</span></td>
-                            <td>느린 쿼리 인덱스 최적화</td>
-                            <td>3일</td>
-                            <td>개발팀</td>
-                        </tr>
-                        <tr>
-                            <td><span class="status-warning">중간</span></td>
-                            <td>Performance Insights 활성화</td>
-                            <td>1일</td>
-                            <td>DBA</td>
-                        </tr>
-                        <tr>
-                            <td><span class="status-good">낮음</span></td>
-                            <td>정기 성능 리뷰 프로세스</td>
-                            <td>1주</td>
-                            <td>팀 리더</td>
-                        </tr>
-                    </tbody>
-                </table>
+                {self._generate_recommendations_html(claude_recommendations)}
             </div>
         </div>
 
@@ -5902,7 +6506,7 @@ Knowledge Base 참고 정보:
                     <strong>📞 문의 및 지원</strong><br>
                     생성 도구: DB Assistant MCP Server<br>
                     분석 엔진: Claude Sonnet 4 + AWS CloudWatch<br>
-                    보고서 버전: v2.0 (AWR 스타일)
+                    보고서 버전: v2.0 
                 </div>
                 
                 <div style="text-align: center; margin-top: 30px; color: #7f8c8d; font-size: 0.9em;">
@@ -5916,12 +6520,12 @@ Knowledge Base 참고 정보:
 </html>"""
 
             # HTML 파일 저장
-            with open(report_path, 'w', encoding='utf-8') as f:
+            with open(report_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
-            
+
             return f"""🗄️ 종합 성능 진단 보고서 생성 완료
 
-📊 **Oracle AWR 스타일 보고서**
+📊 **데이터베이스 성능 보고서**
 • 인스턴스: {db_instance_identifier}
 • 리전: {region}
 • 분석 기간: {hours}시간
@@ -5942,7 +6546,6 @@ Knowledge Base 참고 정보:
 ✅ 반응형 HTML 디자인
 
 💡 **주요 특징:**
-• Oracle AWR 리포트와 유사한 구조
 • 모바일 최적화된 반응형 디자인
 • 상세한 메트릭 분석 및 시각화
 • 실행 가능한 최적화 권장사항
@@ -6009,6 +6612,24 @@ Knowledge Base 참고 정보:
         try:
             if not self.setup_cloudwatch_client(region):
                 return "CloudWatch 클라이언트 설정에 실패했습니다."
+
+            # 클러스터 확인 및 인스턴스 identifier 변환
+            try:
+                rds_client = boto3.client('rds', region_name=region)
+                cluster_response = rds_client.describe_db_clusters(
+                    DBClusterIdentifier=db_instance_identifier
+                )
+                if cluster_response['DBClusters']:
+                    cluster = cluster_response['DBClusters'][0]
+                    if cluster['DBClusterMembers']:
+                        # 첫 번째 인스턴스 사용 (보통 writer 인스턴스)
+                        original_id = db_instance_identifier
+                        db_instance_identifier = cluster['DBClusterMembers'][0]['DBInstanceIdentifier']
+                        logger.info(f"클러스터 {original_id}에서 인스턴스 {db_instance_identifier}로 변환")
+            except rds_client.exceptions.DBClusterNotFoundFault:
+                logger.debug(f"{db_instance_identifier}는 인스턴스 ID입니다")
+            except Exception as e:
+                logger.debug(f"클러스터 확인 실패: {str(e)}")
 
             if not metrics:
                 metrics = self.default_metrics
@@ -6521,10 +7142,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -6550,10 +7173,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -6611,10 +7236,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -6676,10 +7303,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -6705,10 +7334,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -6766,10 +7397,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -6795,10 +7428,12 @@ Knowledge Base 참고 정보:
                     if query and query.strip():
                         query_clean = query.strip()
                         # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith('EXPLAIN'):
+                        if not query_clean.upper().startswith("EXPLAIN"):
                             # performance_schema, information_schema 관련 쿼리 제외
-                            if ('performance_schema' not in query_clean.lower() and 
-                                'information_schema' not in query_clean.lower()):
+                            if (
+                                "performance_schema" not in query_clean.lower()
+                                and "information_schema" not in query_clean.lower()
+                            ):
                                 collected_queries.add(query_clean)
 
             except Exception as e:
@@ -7195,7 +7830,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     "latest_count": {
                         "type": "integer",
                         "description": "최신 파일 개수 제한 (선택사항)",
-                    }
+                    },
                 },
             },
         ),
@@ -7321,17 +7956,17 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             )
         elif name == "generate_consolidated_report":
             result = await db_assistant.generate_consolidated_report(
-                arguments.get("keyword"), 
+                arguments.get("keyword"),
                 arguments.get("report_files"),
                 arguments.get("date_filter"),
-                arguments.get("latest_count")
+                arguments.get("latest_count"),
             )
         elif name == "generate_comprehensive_performance_report":
             result = await db_assistant.generate_comprehensive_performance_report(
                 arguments["database_secret"],
                 arguments["db_instance_identifier"],
                 arguments.get("region", "ap-northeast-2"),
-                arguments.get("hours", 24)
+                arguments.get("hours", 24),
             )
         else:
             result = f"알 수 없는 도구: {name}"
