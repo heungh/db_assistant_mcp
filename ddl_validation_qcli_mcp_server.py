@@ -5812,7 +5812,7 @@ Knowledge Base 성능 최적화 가이드:
                     <p>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
                 </div>
                 <div class="summary-item">
-                    <h4>🔧 DDL 타입</h4>
+                    <h4>🔧 SQL 타입</h4>
                     <p>{sql_type}</p>
                 </div>
                 <div class="summary-item">
@@ -5824,7 +5824,7 @@ Knowledge Base 성능 최적화 가이드:
             {db_info_section}
             
             <div class="info-section">
-                <h3>📝 원본 DDL</h3>
+                <h3>📝 원본 SQL</h3>
                 <div class="sql-code">{ddl_content}</div>
             </div>
             
