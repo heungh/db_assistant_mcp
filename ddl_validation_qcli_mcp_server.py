@@ -6981,16 +6981,34 @@ Knowledge Base 성능 최적화 가이드:
                 "recommendations": [],
             }
 
-            # 각 인스턴스의 메트릭 로드 및 비교
+            logger.info(f"클러스터 메트릭 분석 시작: {cluster_metrics}")
+
+            # 각 인스턴스의 메트릭 로드 및 비교 - data 폴더에서 직접 찾기
             metrics_data = {}
-            for instance_id, csv_file in cluster_metrics.items():
-                csv_path = Path("data") / csv_file
-                if csv_path.exists():
+            
+            # 클러스터 멤버에서 인스턴스 ID 가져오기
+            for member in cluster_info["DBClusterMembers"]:
+                instance_id = member["DBInstanceIdentifier"]
+                
+                # data 폴더에서 해당 인스턴스의 최신 CSV 파일 찾기
+                data_dir = Path("data")
+                csv_files = list(data_dir.glob(f"database_metrics_{instance_id}_*.csv"))
+                
+                if csv_files:
+                    # 가장 최신 파일 선택 (파일명의 타임스탬프 기준)
+                    latest_csv = max(csv_files, key=lambda x: x.name.split('_')[-1])
+                    logger.info(f"메트릭 파일 발견: {instance_id} -> {latest_csv}")
+                    
                     try:
-                        df = pd.read_csv(csv_path)
+                        df = pd.read_csv(latest_csv)
                         metrics_data[instance_id] = df
+                        logger.info(f"메트릭 파일 로드 성공: {instance_id} ({len(df)} 행)")
                     except Exception as e:
-                        logger.warning(f"메트릭 파일 로드 실패 {csv_file}: {e}")
+                        logger.warning(f"메트릭 파일 로드 실패 {latest_csv}: {e}")
+                else:
+                    logger.warning(f"메트릭 파일 없음: {instance_id}")
+
+            logger.info(f"로드된 메트릭 데이터: {len(metrics_data)}개 인스턴스")
 
             if len(metrics_data) >= 2:
                 # Writer vs Reader 비교
@@ -7005,6 +7023,8 @@ Knowledge Base 성능 최적화 가이드:
                         for m in cluster_info["DBClusterMembers"]
                     )
 
+                    logger.info(f"인스턴스 역할 확인: {instance_id} -> {'Writer' if is_writer else 'Reader'}")
+
                     if is_writer:
                         writer_data = df
                     else:
@@ -7012,14 +7032,30 @@ Knowledge Base 성능 최적화 가이드:
 
                 # 부하 분산 분석
                 if writer_data is not None and reader_data:
-                    analysis["load_distribution"] = self._analyze_load_distribution(
-                        writer_data, reader_data
-                    )
+                    logger.info("부하 분산 분석 시작")
+                    try:
+                        analysis["load_distribution"] = self._analyze_load_distribution(
+                            writer_data, reader_data
+                        )
+                        logger.info("부하 분산 분석 완료")
+                    except Exception as e:
+                        logger.error(f"부하 분산 분석 오류: {e}")
+                        analysis["load_distribution"] = {}
+                else:
+                    logger.warning(f"부하 분산 분석 불가: writer_data={writer_data is not None}, reader_data={len(reader_data)}")
 
                 # 리소스 사용률 비교
-                analysis["resource_comparison"] = self._compare_resource_usage(
-                    metrics_data
-                )
+                try:
+                    logger.info("리소스 사용률 비교 시작")
+                    analysis["resource_comparison"] = self._compare_resource_usage(
+                        metrics_data
+                    )
+                    logger.info("리소스 사용률 비교 완료")
+                except Exception as e:
+                    logger.error(f"리소스 사용률 비교 오류: {e}")
+                    analysis["resource_comparison"] = {}
+            else:
+                logger.warning(f"분석을 위한 메트릭 데이터 부족: {len(metrics_data)}개 (최소 2개 필요)")
 
             return analysis
 
@@ -7338,13 +7374,25 @@ Knowledge Base 성능 최적화 가이드:
     def _generate_load_distribution_html(self, load_analysis):
         """부하 분산 분석 HTML 생성"""
         if not load_analysis:
-            return "<p>부하 분산 데이터를 분석할 수 없습니다.</p>"
+            return """
+            <div class="recommendation">
+                <h4 style="color: #dc3545;">⚠️ 부하 분산 데이터 분석 불가</h4>
+                <p><strong>원인:</strong> 클러스터 메트릭 데이터가 충분하지 않거나 분석 중 오류가 발생했습니다.</p>
+                <p><strong>확인사항:</strong></p>
+                <ul>
+                    <li>각 인스턴스의 CloudWatch 메트릭이 정상적으로 수집되고 있는지 확인</li>
+                    <li>Writer와 Reader 인스턴스가 모두 활성 상태인지 확인</li>
+                    <li>메트릭 수집 기간 동안 충분한 데이터가 있는지 확인</li>
+                </ul>
+                <p><strong>권장조치:</strong> 개별 인스턴스 상세 보고서를 확인하여 각 인스턴스의 성능 상태를 점검하세요.</p>
+            </div>
+            """
 
         writer = load_analysis.get("writer", {})
         readers = load_analysis.get("readers", [])
 
         html = f"""
-        <div class="balance-score">
+        <div style="margin: 10px 0; padding: 10px; background: #e3f2fd; border-radius: 5px;">
             <h4>Writer 인스턴스</h4>
             <p>CPU: {writer.get('cpu', 0):.1f}% | 연결 수: {writer.get('connections', 0):.1f}</p>
         </div>
@@ -7365,7 +7413,19 @@ Knowledge Base 성능 최적화 가이드:
     def _generate_resource_comparison_html(self, resource_comparison):
         """리소스 비교 HTML 생성"""
         if not resource_comparison:
-            return "<p>리소스 비교 데이터가 없습니다.</p>"
+            return """
+            <div class="recommendation">
+                <h4 style="color: #dc3545;">⚠️ 리소스 비교 데이터 없음</h4>
+                <p><strong>원인:</strong> 인스턴스별 메트릭 데이터 수집 또는 분석 과정에서 문제가 발생했습니다.</p>
+                <p><strong>확인사항:</strong></p>
+                <ul>
+                    <li>각 인스턴스의 CloudWatch 메트릭 수집 상태 확인</li>
+                    <li>메트릭 데이터 파일이 올바르게 생성되었는지 확인</li>
+                    <li>분석 라이브러리(pandas, numpy)가 정상 설치되어 있는지 확인</li>
+                </ul>
+                <p><strong>권장조치:</strong> 개별 인스턴스 보고서에서 각 인스턴스의 상세 메트릭을 확인하세요.</p>
+            </div>
+            """
 
         html = ""
         for instance_id, metrics in resource_comparison.items():
