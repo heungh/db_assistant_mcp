@@ -8457,6 +8457,802 @@ Knowledge Base 성능 최적화 가이드:
         except Exception as e:
             return f"❌ 임시 공간 집약적 쿼리 수집 실패: {str(e)}"
 
+    async def analyze_aurora_mysql_error_logs(
+        self, keyword: str, start_datetime_str: str, end_datetime_str: str
+    ) -> str:
+        """Aurora MySQL 에러 로그 분석"""
+        try:
+            # 시간 변환
+            start_time = datetime.strptime(start_datetime_str, "%Y-%m-%d %H:%M:%S")
+            end_time = datetime.strptime(end_datetime_str, "%Y-%m-%d %H:%M:%S")
+            
+            logger.info(f"에러 로그 분석 시작: {start_time} ~ {end_time}")
+            
+            # AWS 클라이언트 초기화
+            s3_client = boto3.client("s3", region_name="ap-northeast-2")
+            rds_client = boto3.client("rds", region_name="ap-northeast-2")
+            
+            # 키워드로 시크릿 리스트 가져오기
+            secret_lists = await self._get_secrets_by_keyword(keyword)
+            if not secret_lists:
+                return f"❌ '{keyword}' 키워드로 찾은 시크릿이 없습니다."
+            
+            results = []
+            s3_bucket_name = "your-s3-bucket-name"  # 실제 S3 버킷명으로 변경 필요
+            
+            for secret_name in secret_lists:
+                try:
+                    # DB 인스턴스 식별자 가져오기
+                    response = rds_client.describe_db_instances(
+                        Filters=[{"Name": "db-cluster-id", "Values": [secret_name]}]
+                    )
+                    instances = [
+                        instance["DBInstanceIdentifier"] 
+                        for instance in response["DBInstances"]
+                    ]
+                    
+                    for instance in instances:
+                        log_content = []
+                        output_file = f"error_log_{instance}_{start_time.strftime('%Y%m%d%H%M')}_to_{end_time.strftime('%Y%m%d%H%M')}.log"
+                        
+                        # 에러 로그 파일 목록 가져오기
+                        log_file_list = rds_client.describe_db_log_files(
+                            DBInstanceIdentifier=instance,
+                            FilenameContains="error"
+                        )
+                        
+                        for log_file_info in log_file_list["DescribeDBLogFiles"]:
+                            log_filename = log_file_info["LogFileName"]
+                            last_written = datetime.fromtimestamp(
+                                log_file_info["LastWritten"] / 1000
+                            )
+                            
+                            if start_time <= last_written <= end_time:
+                                # 로그 파일 내용 다운로드
+                                response = rds_client.download_db_log_file_portion(
+                                    DBInstanceIdentifier=instance,
+                                    LogFileName=log_filename,
+                                    Marker="0"
+                                )
+                                
+                                log_data = response.get("LogFileData", "")
+                                lines = log_data.splitlines()
+                                
+                                # 중요한 에러 로그 항목 필터링
+                                error_keywords = [
+                                    "error", "warning", "critical", "failed", 
+                                    "crash", "exception", "fatal", "corruption"
+                                ]
+                                
+                                for line in lines:
+                                    if any(kw in line.lower() for kw in error_keywords):
+                                        log_content.append(line)
+                        
+                        # 로그 내용이 있으면 결과에 추가
+                        if log_content:
+                            # 적절한 크기로 분할 (최대 5000자)
+                            content_chunks = self._split_log_content(log_content, 5000)
+                            for i, chunk in enumerate(content_chunks):
+                                chunk_header = f"<{instance}_chunk_{i+1}>" if len(content_chunks) > 1 else f"<{instance}>"
+                                chunk_footer = f"</{instance}_chunk_{i+1}>" if len(content_chunks) > 1 else f"</{instance}>"
+                                results.append(f"{chunk_header}\n{chunk}\n{chunk_footer}")
+                        else:
+                            results.append(f"<{instance}>\n해당 기간에 에러 로그가 없습니다.\n</{instance}>")
+                            
+                except Exception as e:
+                    logger.error(f"인스턴스 {secret_name} 처리 중 오류: {e}")
+                    results.append(f"<{secret_name}>\n로그 수집 중 오류 발생: {str(e)}\n</{secret_name}>")
+            
+            if not results:
+                return "❌ 분석할 에러 로그를 찾을 수 없습니다."
+            
+            # Claude를 통한 에러 로그 분석
+            analysis_result = await self._analyze_error_logs_with_claude(results)
+            
+            # 결과 저장
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = Path("output") / f"error_log_analysis_{timestamp}.html"
+            
+            # HTML 보고서 생성
+            html_report = await self._generate_error_log_html_report(
+                results, analysis_result, keyword, start_datetime_str, end_datetime_str, output_path
+            )
+            
+            return f"""✅ Aurora MySQL 에러 로그 분석 완료
+
+📊 분석 요약:
+• 분석 기간: {start_datetime_str} ~ {end_datetime_str}
+• 대상 키워드: {keyword}
+• 분석된 인스턴스: {len(secret_lists)}개
+• 수집된 로그 청크: {len(results)}개
+
+🤖 Claude AI 분석 결과:
+{analysis_result}
+
+📄 상세 보고서: {html_report}
+"""
+            
+        except Exception as e:
+            logger.error(f"에러 로그 분석 중 오류: {e}")
+            return f"❌ 에러 로그 분석 실패: {str(e)}"
+
+    def _split_log_content(self, log_lines: List[str], max_chars: int) -> List[str]:
+        """로그 내용을 적절한 크기로 분할"""
+        chunks = []
+        current_chunk = []
+        current_size = 0
+        
+        for line in log_lines:
+            line_size = len(line) + 1  # +1 for newline
+            
+            if current_size + line_size > max_chars and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_size = line_size
+            else:
+                current_chunk.append(line)
+                current_size += line_size
+        
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+
+    async def _get_secrets_by_keyword(self, keyword: str) -> List[str]:
+        """키워드로 시크릿 목록 조회"""
+        try:
+            secrets_client = boto3.client("secretsmanager", region_name="ap-northeast-2")
+            response = secrets_client.list_secrets()
+            
+            matching_secrets = []
+            for secret in response.get("SecretList", []):
+                secret_name = secret["Name"]
+                if keyword.lower() in secret_name.lower():
+                    matching_secrets.append(secret_name)
+            
+            return matching_secrets
+            
+        except Exception as e:
+            logger.error(f"시크릿 목록 조회 중 오류: {e}")
+            return []
+
+    async def _analyze_error_logs_with_claude(self, log_results: List[str]) -> str:
+        """Claude를 통한 에러 로그 분석"""
+        try:
+            # 로그 내용 결합
+            combined_logs = '\n'.join(log_results)
+            
+            prompt = f"""아래는 Aurora MySQL 3.5 인스턴스의 에러 로그입니다. 각 인스턴스에 대한 에러로그를 분석하고 다음 사항에 대한 요약을 제공해주세요:
+
+<instance명>과 </instance명> 사이에 있는 로그는 해당 인스턴스의 error log입니다.
+
+어떤 키워드의 에러가 가장 많이 나타났는지, 에러카테고리별로 집계도 부탁합니다.
+아래와 같은 포맷으로 각 인스턴스별로 에러 카테고리별로 집계하고, 분석한 내용을 넣어주세요.
+
+예를 들어 aborted connection이 몇건있었고, 그것은 어떤 영향을 가지는지 설명해주세요.
+분석할때 어느 인스턴스에 있는 어떤 내용을 근거로 했는지 명확하게 하고, 그렇지 않으면 모르겠다고 합니다.
+
+**분석 결과:**
+
+1. **전체 요약**
+   - 총 에러 건수: X건
+   - 심각도별 분류: 높음/중간/낮음
+   - 주요 에러 패턴: 
+
+2. **인스턴스별 상세 분석**
+
+3. **권장 조치사항**
+
+<context>
+심각한 에러 키워드:
+1. "Fatal error" - 영향도: 매우 높음 (데이터베이스 서버 중지/재시작 가능)
+2. "Out of memory" - 영향도: 높음 (메모리 부족으로 성능 저하/쿼리 실패)
+3. "Disk full" - 영향도: 높음 (디스크 공간 부족으로 쓰기 작업 실패)
+4. "Connection refused" - 영향도: 중간~높음 (클라이언트 연결 문제)
+5. "InnoDB: Corruption" - 영향도: 높음 (데이터 무결성 문제, 데이터 손실 가능)
+
+주의가 필요한 에러 키워드:
+6. "Slow query" - 영향도: 중간 (성능 저하)
+7. "Lock wait timeout exceeded" - 영향도: 중간 (동시성 문제)
+8. "Warning" - 영향도: 낮음~중간 (잠재적 문제)
+9. "Table is full" - 영향도: 중간 (테이블 용량 초과)
+10. "Deadlock found" - 영향도: 중간 (트랜잭션 충돌)
+</context>
+
+{combined_logs}
+"""
+
+            claude_input = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                ],
+                "temperature": 0.3,
+            })
+
+            sonnet_4_model_id = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+            sonnet_3_7_model_id = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+
+            # Claude Sonnet 4 호출 시도
+            try:
+                response = self.bedrock_client.invoke_model(
+                    modelId=sonnet_4_model_id, body=claude_input
+                )
+                response_body = json.loads(response.get("body").read())
+                claude_response = response_body.get("content", [{}])[0].get("text", "")
+                logger.info("Claude Sonnet 4로 에러 로그 분석 완료")
+                return claude_response
+                
+            except Exception as e:
+                logger.warning(f"Claude Sonnet 4 호출 실패, fallback 시도: {e}")
+                
+                # Claude 3.7 Sonnet 호출 (fallback)
+                try:
+                    response = self.bedrock_client.invoke_model(
+                        modelId=sonnet_3_7_model_id, body=claude_input
+                    )
+                    response_body = json.loads(response.get("body").read())
+                    claude_response = response_body.get("content", [{}])[0].get("text", "")
+                    logger.info("Claude 3.7 Sonnet으로 에러 로그 분석 완료")
+                    return claude_response
+                    
+                except Exception as e2:
+                    logger.error(f"Claude 호출 완전 실패: {e2}")
+                    return f"Claude 분석 실패: {str(e2)}"
+                    
+        except Exception as e:
+            logger.error(f"에러 로그 Claude 분석 중 오류: {e}")
+            return f"분석 중 오류 발생: {str(e)}"
+
+    async def _generate_error_log_html_report(
+        self, log_results: List[str], analysis_result: str, keyword: str, 
+        start_time: str, end_time: str, output_path: Path
+    ) -> str:
+        """에러 로그 분석 HTML 보고서 생성"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            html_content = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aurora MySQL 에러 로그 분석 보고서</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; }}
+        .header h1 {{ margin: 0; font-size: 2.5em; }}
+        .header .subtitle {{ margin-top: 10px; opacity: 0.9; }}
+        .content {{ padding: 30px; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }}
+        .summary-card {{ background: #f8f9fa; border-left: 4px solid #007bff; padding: 20px; border-radius: 5px; }}
+        .summary-card h3 {{ margin: 0 0 10px 0; color: #333; }}
+        .summary-card .value {{ font-size: 1.5em; font-weight: bold; color: #007bff; }}
+        .analysis-section {{ margin-bottom: 30px; }}
+        .analysis-section h2 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
+        .log-content {{ background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; margin: 10px 0; font-family: monospace; font-size: 0.9em; max-height: 400px; overflow-y: auto; }}
+        .error-high {{ color: #dc3545; font-weight: bold; }}
+        .error-medium {{ color: #fd7e14; }}
+        .error-low {{ color: #6c757d; }}
+        .footer {{ text-align: center; padding: 20px; color: #6c757d; border-top: 1px solid #dee2e6; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 Aurora MySQL 에러 로그 분석</h1>
+            <div class="subtitle">생성일시: {timestamp}</div>
+        </div>
+        
+        <div class="content">
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h3>분석 기간</h3>
+                    <div class="value">{start_time}<br>~<br>{end_time}</div>
+                </div>
+                <div class="summary-card">
+                    <h3>대상 키워드</h3>
+                    <div class="value">{keyword}</div>
+                </div>
+                <div class="summary-card">
+                    <h3>로그 청크 수</h3>
+                    <div class="value">{len(log_results)}개</div>
+                </div>
+            </div>
+            
+            <div class="analysis-section">
+                <h2>🤖 Claude AI 분석 결과</h2>
+                <div class="log-content">
+                    {analysis_result.replace(chr(10), '<br>')}
+                </div>
+            </div>
+            
+            <div class="analysis-section">
+                <h2>📋 원본 로그 데이터</h2>
+                {''.join([f'<div class="log-content">{log.replace(chr(10), "<br>")}</div>' for log in log_results])}
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>DB Assistant MCP Server - Aurora MySQL 에러 로그 분석 보고서</p>
+        </div>
+    </div>
+</body>
+</html>"""
+
+            # 출력 디렉토리 생성
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # HTML 파일 저장
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            return str(output_path)
+            
+        except Exception as e:
+            logger.error(f"HTML 보고서 생성 중 오류: {e}")
+            return f"보고서 생성 실패: {str(e)}"
+
+    async def save_to_vector_store(self, content: str, topic: str, category: str = "examples", tags: list = None, force_save: bool = False) -> str:
+        """대화 내용을 벡터 저장소에 저장 (중복 및 상충 검사 포함)"""
+        try:
+            import os
+            from datetime import datetime
+            import re
+            
+            # 1. 강제 저장이 아닌 경우에만 중복/상충 검사
+            if not force_save:
+                duplicate_check = await self._check_content_similarity(content, category)
+                
+                if duplicate_check["is_duplicate"]:
+                    return f"""⚠️ 중복된 내용이 발견되었습니다!
+
+🔍 유사한 기존 문서:
+📄 파일: {duplicate_check["similar_file"]}
+📊 유사도: {duplicate_check["similarity_score"]:.1%}
+
+💡 다음 중 선택하세요:
+1. 'update_vector_content' 도구로 기존 문서 업데이트
+2. 'save_to_vector_store'에 force_save=true로 강제 저장
+3. 저장 취소"""
+                
+                if duplicate_check["has_conflict"]:
+                    return f"""🚨 기존 내용과 상충되는 정보가 발견되었습니다!
+
+⚠️ 상충 내용:
+{duplicate_check["conflict_details"]}
+
+🤔 다음 중 선택하세요:
+1. 새로운 정보가 맞다면 'update_vector_content'로 기존 문서 교체
+2. 기존 정보가 맞다면 저장 취소
+3. 둘 다 맞다면 'save_to_vector_store'에 force_save=true로 별도 저장"""
+            
+            # 2. 중복/상충이 없으면 정상 저장 진행
+            date_str = datetime.now().strftime("%Y%m%d")
+            clean_topic = re.sub(r'[^a-zA-Z0-9]', '', topic.lower())[:10]
+            if not clean_topic:
+                clean_topic = "content"
+            
+            filename = f"{date_str}_{clean_topic}.md"
+            
+            # vector 폴더 생성
+            vector_dir = "vector"
+            os.makedirs(vector_dir, exist_ok=True)
+            
+            # 메타데이터 생성
+            if tags is None:
+                tags = ["conversation", "analysis"]
+            
+            metadata_tags = tags + ["database", "optimization", "best-practices"]
+            
+            # YAML 헤더 생성
+            yaml_header = f"""---
+title: "{topic}"
+category: "{category}"
+tags: {metadata_tags}
+version: "1.0"
+last_updated: "{datetime.now().strftime('%Y-%m-%d')}"
+author: "DB Assistant"
+source: "conversation"
+similarity_checked: true
+---
+
+"""
+            
+            # 파일 내용 생성
+            file_content = yaml_header + content
+            
+            # 로컬 파일 저장
+            local_path = os.path.join(vector_dir, filename)
+            with open(local_path, 'w', encoding='utf-8') as f:
+                f.write(file_content)
+            
+            # S3에 업로드
+            s3_client = boto3.client("s3", region_name="us-east-1")
+            s3_key = f"{category}/{filename}"
+            
+            s3_client.upload_file(
+                local_path,
+                "bedrockagent-hhs",
+                s3_key,
+                ExtraArgs={'ContentType': 'text/markdown'}
+            )
+            
+            logger.info(f"벡터 저장소에 파일 저장 완료: {s3_key}")
+            
+            # 자동으로 Knowledge Base 동기화 실행
+            sync_result = await self.sync_knowledge_base()
+            
+            return f"""✅ 벡터 저장소에 저장 완료!
+
+📁 로컬 저장: {local_path}
+☁️ S3 저장: s3://bedrockagent-hhs/{s3_key}
+🏷️ 카테고리: {category}
+🔖 태그: {', '.join(metadata_tags)}
+✅ 중복/상충 검사: 통과
+
+🔄 Knowledge Base 동기화 자동 실행:
+{sync_result}"""
+            
+        except Exception as e:
+            logger.error(f"벡터 저장소 저장 오류: {e}")
+            return f"❌ 벡터 저장소 저장 중 오류가 발생했습니다: {str(e)}"
+
+    async def _check_content_similarity(self, new_content: str, category: str) -> dict:
+        """기존 내용과 중복/상충 검사"""
+        try:
+            # 1. Knowledge Base에서 유사한 내용 검색
+            similar_docs = await self._search_similar_content(new_content, category)
+            
+            # 2. Claude AI로 중복/상충 분석
+            if similar_docs:
+                analysis = await self._analyze_content_conflicts(new_content, similar_docs)
+                return analysis
+            
+            return {
+                "is_duplicate": False,
+                "has_conflict": False,
+                "similarity_score": 0.0,
+                "similar_file": None,
+                "conflict_details": None
+            }
+            
+        except Exception as e:
+            logger.error(f"내용 유사성 검사 오류: {e}")
+            return {
+                "is_duplicate": False,
+                "has_conflict": False,
+                "similarity_score": 0.0,
+                "similar_file": None,
+                "conflict_details": None
+            }
+
+    async def _search_similar_content(self, content: str, category: str) -> list:
+        """Knowledge Base에서 유사한 내용 검색"""
+        try:
+            # 내용의 핵심 키워드 추출
+            keywords = self._extract_keywords(content)
+            search_query = " ".join(keywords[:5])  # 상위 5개 키워드 사용
+            
+            response = self.bedrock_agent_client.retrieve(
+                knowledgeBaseId=self.knowledge_base_id,
+                retrievalQuery={"text": search_query},
+                retrievalConfiguration={
+                    "vectorSearchConfiguration": {
+                        "numberOfResults": 3,
+                        "overrideSearchType": "SEMANTIC"
+                    }
+                }
+            )
+            
+            similar_docs = []
+            for result in response.get('retrievalResults', []):
+                if result['score'] > 0.7:  # 70% 이상 유사도
+                    similar_docs.append({
+                        "content": result['content']['text'],
+                        "score": result['score'],
+                        "source": result['location']['s3Location']['uri']
+                    })
+            
+            return similar_docs
+            
+        except Exception as e:
+            logger.error(f"유사 내용 검색 오류: {e}")
+            return []
+
+    def _extract_keywords(self, content: str) -> list:
+        """내용에서 핵심 키워드 추출"""
+        import re
+        
+        # 기본적인 키워드 추출 (실제로는 더 정교한 NLP 기법 사용 가능)
+        words = re.findall(r'\b[a-zA-Z가-힣]{3,}\b', content.lower())
+        
+        # 데이터베이스 관련 중요 키워드 우선순위
+        db_keywords = ['mysql', 'aurora', 'index', 'query', 'performance', 'optimization', 
+                      'table', 'database', 'sql', 'schema', 'connection', 'error', 'log']
+        
+        # 중요 키워드 우선 정렬
+        keywords = []
+        for keyword in db_keywords:
+            if keyword in words:
+                keywords.append(keyword)
+        
+        # 나머지 키워드 추가 (빈도순)
+        word_freq = {}
+        for word in words:
+            if word not in keywords and len(word) > 3:
+                word_freq[word] = word_freq.get(word, 0) + 1
+        
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        keywords.extend([word for word, freq in sorted_words[:10]])
+        
+        return keywords
+
+    async def _analyze_content_conflicts(self, new_content: str, similar_docs: list) -> dict:
+        """Claude AI로 내용 중복/상충 분석"""
+        try:
+            similar_content = "\n\n".join([f"문서 {i+1}: {doc['content'][:500]}..." 
+                                         for i, doc in enumerate(similar_docs)])
+            
+            prompt = f"""다음 새로운 내용과 기존 문서들을 비교하여 중복성과 상충성을 분석해주세요.
+
+새로운 내용:
+{new_content}
+
+기존 문서들:
+{similar_content}
+
+다음 기준으로 분석해주세요:
+1. 중복성: 새로운 내용이 기존 문서와 80% 이상 유사한가?
+2. 상충성: 새로운 내용이 기존 문서와 모순되는 정보를 포함하는가?
+
+응답 형식:
+DUPLICATE: true/false
+CONFLICT: true/false
+SIMILARITY_SCORE: 0.0-1.0
+SIMILAR_FILE: 가장 유사한 문서 번호
+CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
+
+            response = self.bedrock_runtime.invoke_model(
+                modelId="us.anthropic.claude-sonnet-4-20250514-v1:0",
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 1000,
+                    "messages": [{"role": "user", "content": prompt}]
+                })
+            )
+            
+            response_body = json.loads(response.get("body").read())
+            analysis_text = response_body.get("content", [{}])[0].get("text", "")
+            
+            # 응답 파싱
+            is_duplicate = "DUPLICATE: true" in analysis_text.lower()
+            has_conflict = "CONFLICT: true" in analysis_text.lower()
+            
+            # 유사도 점수 추출
+            similarity_score = 0.0
+            if similar_docs:
+                similarity_score = similar_docs[0]['score']
+            
+            # 가장 유사한 파일 추출
+            similar_file = None
+            if similar_docs:
+                similar_file = similar_docs[0]['source'].split('/')[-1]
+            
+            # 상충 내용 추출
+            conflict_details = None
+            if has_conflict:
+                lines = analysis_text.split('\n')
+                for line in lines:
+                    if 'CONFLICT_DETAILS:' in line:
+                        conflict_details = line.split('CONFLICT_DETAILS:')[1].strip()
+                        break
+            
+            return {
+                "is_duplicate": is_duplicate,
+                "has_conflict": has_conflict,
+                "similarity_score": similarity_score,
+                "similar_file": similar_file,
+                "conflict_details": conflict_details
+            }
+            
+        except Exception as e:
+            logger.error(f"내용 상충 분석 오류: {e}")
+            return {
+                "is_duplicate": False,
+                "has_conflict": False,
+                "similarity_score": 0.0,
+                "similar_file": None,
+                "conflict_details": None
+            }
+
+    async def sync_knowledge_base(self) -> str:
+        """Knowledge Base 데이터 소스 동기화"""
+        try:
+            bedrock_agent_client = boto3.client("bedrock-agent", region_name="us-east-1")
+            
+            response = bedrock_agent_client.start_ingestion_job(
+                knowledgeBaseId="0WQUBRHVR8",
+                dataSourceId="A8VCUHOHEQ"
+            )
+            
+            job_id = response['ingestionJob']['ingestionJobId']
+            status = response['ingestionJob']['status']
+            
+            logger.info(f"Knowledge Base 동기화 시작: {job_id}")
+            
+            return f"""✅ Knowledge Base 동기화 시작!
+
+🔄 작업 ID: {job_id}
+📊 상태: {status}
+⏰ 시작 시간: {response['ingestionJob']['startedAt']}
+
+💡 동기화가 완료되면 새로운 내용을 Knowledge Base에서 검색할 수 있습니다.
+상태 확인: AWS 콘솔 > Bedrock > Knowledge Base > 데이터 소스"""
+            
+        except Exception as e:
+            logger.error(f"Knowledge Base 동기화 오류: {e}")
+            return f"❌ Knowledge Base 동기화 중 오류가 발생했습니다: {str(e)}"
+
+    async def query_vector_store(self, query: str, max_results: int = 5) -> str:
+        """벡터 저장소에서 내용을 검색합니다"""
+        try:
+            bedrock_agent_runtime = boto3.client('bedrock-agent-runtime', region_name='us-east-1')
+            
+            # Knowledge Base에서 검색
+            response = bedrock_agent_runtime.retrieve(
+                knowledgeBaseId="0WQUBRHVR8",
+                retrievalQuery={'text': query},
+                retrievalConfiguration={
+                    'vectorSearchConfiguration': {
+                        'numberOfResults': max_results
+                    }
+                }
+            )
+            
+            if not response.get('retrievalResults'):
+                return f"""🔍 검색 결과가 없습니다.
+
+🔎 검색어: '{query}'
+💡 다른 키워드로 시도해보세요.
+📝 예시: 'HLL', 'lock', 'performance', 'SQL' 등"""
+            
+            results = []
+            for i, result in enumerate(response['retrievalResults'], 1):
+                content = result['content']['text']
+                score = result.get('score', 0)
+                
+                # 메타데이터 추출
+                metadata = result.get('metadata', {})
+                source = metadata.get('source', '알 수 없음')
+                
+                # 내용 길이 제한
+                preview = content[:300] + '...' if len(content) > 300 else content
+                
+                results.append(f"""📄 **결과 {i}** (관련도: {score:.2f})
+📁 출처: {source}
+📝 내용:
+{preview}
+""")
+            
+            return f"""🔍 **벡터 저장소 검색 결과**
+
+🔎 검색어: "{query}"
+📊 총 {len(results)}개 결과 발견
+
+{chr(10).join(results)}
+
+💡 더 구체적인 검색을 원하시면 키워드를 세분화해보세요."""
+            
+        except Exception as e:
+            logger.error(f"벡터 검색 실패: {str(e)}")
+            return f"벡터 검색 실패: {str(e)}"
+
+    async def update_vector_content(self, filename: str, new_content: str, update_mode: str = "append") -> str:
+        """기존 벡터 저장소 문서 업데이트"""
+        try:
+            import os
+            from datetime import datetime
+            
+            # 로컬 파일 경로
+            local_path = os.path.join("vector", filename)
+            
+            if not os.path.exists(local_path):
+                return f"❌ 파일을 찾을 수 없습니다: {filename}"
+            
+            # 기존 파일 읽기
+            with open(local_path, 'r', encoding='utf-8') as f:
+                existing_content = f.read()
+            
+            # YAML 헤더와 본문 분리
+            if existing_content.startswith('---'):
+                parts = existing_content.split('---', 2)
+                if len(parts) >= 3:
+                    yaml_header = f"---{parts[1]}---"
+                    existing_body = parts[2].strip()
+                else:
+                    yaml_header = ""
+                    existing_body = existing_content
+            else:
+                yaml_header = ""
+                existing_body = existing_content
+            
+            # 업데이트 모드에 따른 내용 처리
+            if update_mode == "replace":
+                updated_body = new_content
+            else:  # append
+                updated_body = f"{existing_body}\n\n## 업데이트 ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n{new_content}"
+            
+            # YAML 헤더 업데이트
+            if yaml_header:
+                # last_updated 필드 업데이트
+                import re
+                yaml_header = re.sub(
+                    r'last_updated: "[^"]*"',
+                    f'last_updated: "{datetime.now().strftime("%Y-%m-%d")}"',
+                    yaml_header
+                )
+                # version 업데이트
+                version_match = re.search(r'version: "([^"]*)"', yaml_header)
+                if version_match:
+                    current_version = version_match.group(1)
+                    try:
+                        version_num = float(current_version) + 0.1
+                        yaml_header = re.sub(
+                            r'version: "[^"]*"',
+                            f'version: "{version_num:.1f}"',
+                            yaml_header
+                        )
+                    except:
+                        pass
+            
+            # 새로운 파일 내용 생성
+            updated_content = f"{yaml_header}\n\n{updated_body}" if yaml_header else updated_body
+            
+            # 로컬 파일 업데이트
+            with open(local_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+            
+            # S3 업데이트
+            s3_client = boto3.client("s3", region_name="us-east-1")
+            
+            # 카테고리 추출 (파일명에서 또는 YAML에서)
+            category = "examples"  # 기본값
+            if yaml_header:
+                category_match = re.search(r'category: "([^"]*)"', yaml_header)
+                if category_match:
+                    category = category_match.group(1)
+            
+            s3_key = f"{category}/{filename}"
+            
+            s3_client.upload_file(
+                local_path,
+                "bedrockagent-hhs",
+                s3_key,
+                ExtraArgs={'ContentType': 'text/markdown'}
+            )
+            
+            logger.info(f"벡터 저장소 파일 업데이트 완료: {s3_key}")
+            
+            # 자동으로 Knowledge Base 동기화 실행
+            sync_result = await self.sync_knowledge_base()
+            
+            return f"""✅ 벡터 저장소 문서 업데이트 완료!
+
+📁 로컬 파일: {local_path}
+☁️ S3 파일: s3://bedrockagent-hhs/{s3_key}
+🔄 업데이트 모드: {update_mode}
+📝 업데이트 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+🔄 Knowledge Base 동기화 자동 실행:
+{sync_result}"""
+            
+        except Exception as e:
+            logger.error(f"벡터 저장소 업데이트 오류: {e}")
+            return f"❌ 벡터 저장소 업데이트 중 오류가 발생했습니다: {str(e)}"
+
 
 # MCP 서버 설정
 server = Server("db-assistant-mcp-server")
@@ -8809,6 +9605,28 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="analyze_aurora_mysql_error_logs",
+            description="Aurora MySQL 에러 로그를 분석합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "검색할 키워드 (시크릿 이름 필터링용)",
+                    },
+                    "start_datetime_str": {
+                        "type": "string",
+                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS 형식)",
+                    },
+                    "end_datetime_str": {
+                        "type": "string",
+                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS 형식)",
+                    },
+                },
+                "required": ["keyword", "start_datetime_str", "end_datetime_str"],
+            },
+        ),
+        types.Tool(
             name="test_individual_query_validation",
             description="개별 쿼리 검증 테스트 (디버그용)",
             inputSchema={
@@ -8847,6 +9665,91 @@ async def handle_list_tools() -> list[types.Tool]:
                         "description": "최신 파일 개수 제한 (선택사항)",
                     },
                 },
+            },
+        ),
+        types.Tool(
+            name="save_to_vector_store",
+            description="대화 내용이나 분석 결과를 벡터 저장소(Knowledge Base)에 저장합니다 (중복/상충 검사 포함)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "저장할 내용",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "주제명 (10자 이내 영문)",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "카테고리 (database-standards, performance-optimization, troubleshooting, examples 중 선택)",
+                        "enum": ["database-standards", "performance-optimization", "troubleshooting", "examples"],
+                        "default": "examples"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "태그 목록 (선택사항)",
+                    },
+                    "force_save": {
+                        "type": "boolean",
+                        "description": "중복/상충 검사 무시하고 강제 저장 (선택사항)",
+                        "default": False
+                    },
+                },
+                "required": ["content", "topic"],
+            },
+        ),
+        types.Tool(
+            name="update_vector_content",
+            description="기존 벡터 저장소 문서를 업데이트합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "업데이트할 파일명",
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "새로운 내용 (기존 내용에 추가됨)",
+                    },
+                    "update_mode": {
+                        "type": "string",
+                        "description": "업데이트 모드 (append: 추가, replace: 교체)",
+                        "enum": ["append", "replace"],
+                        "default": "append"
+                    },
+                },
+                "required": ["filename", "new_content"],
+            },
+        ),
+        types.Tool(
+            name="sync_knowledge_base",
+            description="Knowledge Base 데이터 소스를 동기화합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        types.Tool(
+            name="query_vector_store",
+            description="벡터 저장소(Knowledge Base)에서 내용을 검색합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색할 키워드나 질문",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "최대 검색 결과 수 (기본값: 5)",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
             },
         ),
         types.Tool(
@@ -8992,6 +9895,33 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         elif name == "collect_temp_space_intensive_queries":
             result = await db_assistant.collect_temp_space_intensive_queries(
                 arguments["database_secret"], arguments.get("db_instance_identifier")
+            )
+        elif name == "analyze_aurora_mysql_error_logs":
+            result = await db_assistant.analyze_aurora_mysql_error_logs(
+                arguments["keyword"], 
+                arguments["start_datetime_str"], 
+                arguments["end_datetime_str"]
+            )
+        elif name == "save_to_vector_store":
+            result = await db_assistant.save_to_vector_store(
+                arguments["content"],
+                arguments["topic"],
+                arguments.get("category", "examples"),
+                arguments.get("tags"),
+                arguments.get("force_save", False)
+            )
+        elif name == "update_vector_content":
+            result = await db_assistant.update_vector_content(
+                arguments["filename"],
+                arguments["new_content"],
+                arguments.get("update_mode", "append")
+            )
+        elif name == "sync_knowledge_base":
+            result = await db_assistant.sync_knowledge_base()
+        elif name == "query_vector_store":
+            result = await db_assistant.query_vector_store(
+                arguments["query"],
+                arguments.get("max_results", 5)
             )
         elif name == "test_individual_query_validation":
             result = await db_assistant.test_individual_query_validation(
