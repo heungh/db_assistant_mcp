@@ -26,14 +26,16 @@ except ImportError:
 
 # 분석 관련 라이브러리
 ANALYSIS_AVAILABLE = False
+CHART_AVAILABLE = False
 try:
     import pandas as pd
     import numpy as np
     import sqlparse
     import matplotlib
 
-    matplotlib.use("Agg")  # GUI 없는 환경에서 matplotlib 사용
+    matplotlib.use("Agg")  # GUI 없는 환경에서 사용
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import PolynomialFeatures
     from sklearn.linear_model import LinearRegression
@@ -41,6 +43,7 @@ try:
     from sklearn.impute import SimpleImputer
 
     ANALYSIS_AVAILABLE = True
+    CHART_AVAILABLE = True
 except ImportError:
     sqlparse = None
 
@@ -97,6 +100,16 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SQL_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+
+# 전역 debug_log 함수
+def debug_log(message: str):
+    """전역 디버그 로그 함수"""
+    debug_log_path = LOGS_DIR / f"debug_{datetime.now().strftime('%Y%m%d')}.log"
+    try:
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
+    except Exception:
+        pass  # 로그 실패 시 무시
 
 
 class DBAssistantMCPServer:
@@ -183,6 +196,12 @@ class DBAssistantMCPServer:
             return schema.strip("`"), table.strip("`")
         return None, full_table_name.strip("`")
 
+    def format_file_link(self, file_path: str, display_name: str = None) -> str:
+        """파일 경로를 HTML 링크로 변환"""
+        if not display_name:
+            display_name = Path(file_path).name
+        return f'<a href="file://{file_path}" class="file-link" target="_blank">{display_name}</a>'
+
     async def query_knowledge_base(self, query: str, sql_type: str) -> str:
         """Knowledge Base에서 관련 정보 조회"""
         try:
@@ -229,6 +248,86 @@ class DBAssistantMCPServer:
         except Exception as e:
             logger.warning(f"Knowledge Base 조회 실패: {e}")
             return "Knowledge Base 조회 중 오류가 발생했습니다."
+
+    def convert_kst_to_utc(self, kst_time_str: str) -> datetime:
+        """KST 시간 문자열을 UTC datetime 객체로 변환"""
+        try:
+            kst_dt = datetime.strptime(kst_time_str, "%Y-%m-%d %H:%M:%S")
+            utc_dt = kst_dt - timedelta(hours=9)
+            return utc_dt
+        except ValueError as e:
+            raise ValueError(f"시간 형식 오류. YYYY-MM-DD HH:MM:SS 형식으로 입력하세요: {e}")
+
+    def convert_utc(self, utc_dt: datetime, region_name: str = None) -> datetime:
+        """UTC datetime 객체를 지정된 리전의 로컬 시간으로 변환"""
+        if region_name is None:
+            region_name = self.default_region
+            
+        # AWS 리전별 시간대 오프셋 (UTC 기준)
+        region_timezone_offsets = {
+            # 아시아-태평양
+            'ap-northeast-1': 9,    # 도쿄 (JST)
+            'ap-northeast-2': 9,    # 서울 (KST)
+            'ap-northeast-3': 9,    # 오사카 (JST)
+            'ap-south-1': 5.5,      # 뭄바이 (IST)
+            'ap-southeast-1': 8,    # 싱가포르 (SGT)
+            'ap-southeast-2': 10,   # 시드니 (AEST) - 표준시 기준
+            'ap-east-1': 8,         # 홍콩 (HKT)
+            
+            # 유럽
+            'eu-west-1': 0,         # 아일랜드 (GMT/UTC)
+            'eu-west-2': 0,         # 런던 (GMT/UTC)
+            'eu-west-3': 1,         # 파리 (CET)
+            'eu-central-1': 1,      # 프랑크푸르트 (CET)
+            'eu-north-1': 1,        # 스톡홀름 (CET)
+            
+            # 북미
+            'us-east-1': -5,        # 버지니아 (EST)
+            'us-east-2': -5,        # 오하이오 (EST)
+            'us-west-1': -8,        # 캘리포니아 (PST)
+            'us-west-2': -8,        # 오레곤 (PST)
+            'ca-central-1': -5,     # 캐나다 중부 (EST)
+            
+            # 남미
+            'sa-east-1': -3,        # 상파울루 (BRT)
+            
+            # 중동/아프리카
+            'me-south-1': 3,        # 바레인 (AST)
+            'af-south-1': 2,        # 케이프타운 (SAST)
+        }
+        
+        offset_hours = region_timezone_offsets.get(region_name, 0)
+        
+        # 소수점이 있는 경우 (예: 인도 +5.5시간)
+        if isinstance(offset_hours, float):
+            hours = int(offset_hours)
+            minutes = int((offset_hours - hours) * 60)
+            return utc_dt + timedelta(hours=hours, minutes=minutes)
+        else:
+            return utc_dt + timedelta(hours=offset_hours)
+
+    def set_default_region(self, region_name: str) -> str:
+        """기본 AWS 리전을 변경합니다"""
+        # 지원하는 리전 목록
+        supported_regions = {
+            'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3', 'ap-south-1',
+            'ap-southeast-1', 'ap-southeast-2', 'ap-east-1',
+            'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-north-1',
+            'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'ca-central-1',
+            'sa-east-1', 'me-south-1', 'af-south-1'
+        }
+        
+        if region_name not in supported_regions:
+            return f"❌ 지원하지 않는 리전입니다: {region_name}\n\n✅ 지원하는 리전:\n" + \
+                   "\n".join([f"• {region}" for region in sorted(supported_regions)])
+        
+        old_region = self.default_region
+        self.default_region = region_name
+        
+        # 환경 변수도 업데이트
+        os.environ['AWS_DEFAULT_REGION'] = region_name
+        
+        return f"✅ 기본 리전이 변경되었습니다!\n\n이전: {old_region}\n현재: {self.default_region}\n\n💡 이제 모든 AWS 서비스 호출과 시간 변환이 새 리전 기준으로 작동합니다."
 
     def get_secret(self, secret_name):
         """Secrets Manager에서 DB 연결 정보 가져오기"""
@@ -1316,8 +1415,14 @@ class DBAssistantMCPServer:
             if self.shared_connection and self.shared_connection.is_connected():
                 self.shared_cursor = self.shared_connection.cursor()
                 # 연결된 호스트 정보 로깅
-                host_info = f"인스턴스: {db_instance_identifier}" if db_instance_identifier else "클러스터 엔드포인트"
-                logger.info(f"공용 DB 연결 설정 완료 - {host_info} (터널: {self.tunnel_used})")
+                host_info = (
+                    f"인스턴스: {db_instance_identifier}"
+                    if db_instance_identifier
+                    else "클러스터 엔드포인트"
+                )
+                logger.info(
+                    f"공용 DB 연결 설정 완료 - {host_info} (터널: {self.tunnel_used})"
+                )
                 return True
             else:
                 logger.error("공용 DB 연결 실패")
@@ -1924,11 +2029,6 @@ class DBAssistantMCPServer:
                 LOGS_DIR
                 / f"debug_log_{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             )
-
-            def debug_log(message):
-                with open(debug_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
-                    f.flush()
 
             debug_log(f"validate_ddl 시작 - 파일: {filename}")
             debug_log(f"SQL 내용: {ddl_content.strip()}")
@@ -3925,13 +4025,6 @@ Knowledge Base 성능 최적화 가이드:
                 except Exception as e:
                     debug_log(f"테이블 '{table_name}' 컬럼 조회 실패: {e}")
                     return set()
-
-            def parse_table_name(full_table_name: str) -> tuple:
-                """테이블명에서 스키마와 테이블명을 분리"""
-                if "." in full_table_name:
-                    schema, table = full_table_name.split(".", 1)
-                    return schema.strip("`"), table.strip("`")
-                return None, full_table_name.strip("`")
 
             def table_exists(table_name: str) -> bool:
                 """테이블 존재 여부 확인 (스키마 정보 포함 처리)"""
@@ -6388,6 +6481,202 @@ Knowledge Base 성능 최적화 가이드:
         except Exception as e:
             return f"통합 보고서 생성 실패: {str(e)}"
 
+    def extract_key_metrics_from_csv(self, csv_filename: str) -> dict:
+        """CSV 파일에서 직접 핵심 메트릭을 계산하여 반환"""
+        import csv
+        import statistics
+        
+        metrics = {}
+        
+        try:
+            # CSV 파일 읽기
+            csv_path = DATA_DIR / csv_filename
+            
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                data = list(reader)
+            
+            if not data:
+                raise ValueError("CSV 파일이 비어있습니다")
+            
+            # 각 메트릭별로 통계 계산
+            def calculate_stats(column_name):
+                values = []
+                for row in data:
+                    if column_name in row and row[column_name]:
+                        try:
+                            values.append(float(row[column_name]))
+                        except ValueError:
+                            continue
+                
+                if values:
+                    return {
+                        'mean': statistics.mean(values),
+                        'min': min(values),
+                        'max': max(values)
+                    }
+                return {'mean': 0.0, 'min': 0.0, 'max': 0.0}
+            
+            # CPU 사용률
+            cpu_stats = calculate_stats('CPUUtilization')
+            metrics['cpu_mean'] = cpu_stats['mean']
+            metrics['cpu_min'] = cpu_stats['min']
+            metrics['cpu_max'] = cpu_stats['max']
+            
+            # DB Load
+            dbload_stats = calculate_stats('DBLoad')
+            metrics['dbload_mean'] = dbload_stats['mean']
+            metrics['dbload_min'] = dbload_stats['min']
+            metrics['dbload_max'] = dbload_stats['max']
+            
+            # 연결 수
+            conn_stats = calculate_stats('DatabaseConnections')
+            metrics['connections_mean'] = conn_stats['mean']
+            metrics['connections_min'] = conn_stats['min']
+            metrics['connections_max'] = conn_stats['max']
+            
+            # Read IOPS
+            read_stats = calculate_stats('ReadIOPS')
+            metrics['read_iops_mean'] = read_stats['mean']
+            metrics['read_iops_min'] = read_stats['min']
+            metrics['read_iops_max'] = read_stats['max']
+            
+            # Write IOPS
+            write_stats = calculate_stats('WriteIOPS')
+            metrics['write_iops_mean'] = write_stats['mean']
+            metrics['write_iops_min'] = write_stats['min']
+            metrics['write_iops_max'] = write_stats['max']
+            
+            # 메모리 사용률 계산
+            memory_stats = calculate_stats('FreeableMemory')
+            if memory_stats['mean'] > 0:
+                total_memory = 8 * 1024 * 1024 * 1024  # 8GB
+                metrics['memory_usage_mean'] = ((total_memory - memory_stats['mean']) / total_memory * 100)
+                metrics['memory_usage_min'] = ((total_memory - memory_stats['max']) / total_memory * 100)
+                metrics['memory_usage_max'] = ((total_memory - memory_stats['min']) / total_memory * 100)
+            else:
+                metrics['memory_usage_mean'] = 0.0
+                metrics['memory_usage_min'] = 0.0
+                metrics['memory_usage_max'] = 0.0
+            
+            print(f"DEBUG: Extracted metrics from CSV: {metrics}")
+            
+        except Exception as e:
+            print(f"Error reading CSV file {csv_filename}: {e}")
+            # 기본값 설정
+            for key in ['cpu_mean', 'cpu_min', 'cpu_max', 'dbload_mean', 'dbload_min', 'dbload_max',
+                       'connections_mean', 'connections_min', 'connections_max',
+                       'read_iops_mean', 'read_iops_min', 'read_iops_max',
+                       'write_iops_mean', 'write_iops_min', 'write_iops_max',
+                       'memory_usage_mean', 'memory_usage_min', 'memory_usage_max']:
+                metrics[key] = 0.0
+        
+        return metrics
+
+    def extract_key_metrics(self, summary_text: str) -> dict:
+        """핵심 메트릭만 추출하여 딕셔너리로 반환"""
+        import re
+        
+        # 통계 테이블에서 핵심 메트릭 추출
+        metrics = {}
+        
+        # 실제 pandas describe() 출력에서 직접 값 추출
+        lines = summary_text.split('\n')
+        
+        # mean, min, max 라인을 찾아서 값들을 추출
+        for line in lines:
+            # mean 라인 처리
+            if line.strip().startswith('mean') and 'CPUUtilization' in summary_text:
+                # 공백으로 분할하여 숫자 값들만 추출
+                parts = line.split()
+                if len(parts) >= 13:
+                    try:
+                        metrics['cpu_mean'] = float(parts[2])  # CPUUtilization
+                        metrics['dbload_mean'] = float(parts[3])  # DBLoad
+                        metrics['connections_mean'] = float(parts[6])  # DatabaseConnections
+                        freeable_memory_mean = float(parts[7])  # FreeableMemory (scientific notation)
+                        metrics['read_iops_mean'] = float(parts[10])  # ReadIOPS
+                        metrics['write_iops_mean'] = float(parts[12])  # WriteIOPS
+                        
+                        # 메모리 사용률 계산 (8GB 가정)
+                        total_memory = 8 * 1024 * 1024 * 1024
+                        metrics['memory_usage_mean'] = ((total_memory - freeable_memory_mean) / total_memory * 100)
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing mean line: {e}")
+                        
+            # min 라인 처리
+            elif line.strip().startswith('min') and 'CPUUtilization' in summary_text:
+                parts = line.split()
+                if len(parts) >= 13:
+                    try:
+                        metrics['cpu_min'] = float(parts[2])
+                        metrics['dbload_min'] = float(parts[3])
+                        metrics['connections_min'] = float(parts[6])
+                        freeable_memory_max = float(parts[7])  # min freeable = max usage
+                        metrics['read_iops_min'] = float(parts[10])
+                        metrics['write_iops_min'] = float(parts[12])
+                        
+                        # 메모리 사용률 최대값 계산
+                        total_memory = 8 * 1024 * 1024 * 1024
+                        metrics['memory_usage_max'] = ((total_memory - freeable_memory_max) / total_memory * 100)
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing min line: {e}")
+                        
+            # max 라인 처리
+            elif line.strip().startswith('max') and 'CPUUtilization' in summary_text:
+                parts = line.split()
+                if len(parts) >= 13:
+                    try:
+                        metrics['cpu_max'] = float(parts[2])
+                        metrics['dbload_max'] = float(parts[3])
+                        metrics['connections_max'] = float(parts[6])
+                        freeable_memory_min = float(parts[7])  # max freeable = min usage
+                        metrics['read_iops_max'] = float(parts[10])
+                        metrics['write_iops_max'] = float(parts[12])
+                        
+                        # 메모리 사용률 최소값 계산
+                        total_memory = 8 * 1024 * 1024 * 1024
+                        metrics['memory_usage_min'] = ((total_memory - freeable_memory_min) / total_memory * 100)
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing max line: {e}")
+        
+        return metrics
+
+    def format_metrics_as_html(self, metrics: dict) -> str:
+        """메트릭 딕셔너리를 HTML로 포맷"""
+        # HTML 형태로 포맷
+        html = f"""
+        <div class="metric-grid">
+            <div class="metric-card">
+                <div class="metric-title">🖥️ CPU 사용률 (%)</div>
+                <div class="metric-value">평균: {metrics.get('cpu_mean', 0):.1f}%</div>
+                <div class="metric-unit">최대: {metrics.get('cpu_max', 0):.1f}% | 최소: {metrics.get('cpu_min', 0):.1f}%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">💾 메모리 사용률 (%)</div>
+                <div class="metric-value">평균: {metrics.get('memory_usage_mean', 0):.1f}%</div>
+                <div class="metric-unit">최대: {metrics.get('memory_usage_max', 0):.1f}% | 최소: {metrics.get('memory_usage_min', 0):.1f}%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">✍️ Write IOPS</div>
+                <div class="metric-value">평균: {metrics.get('write_iops_mean', 0):.2f}</div>
+                <div class="metric-unit">최대: {metrics.get('write_iops_max', 0):.2f} | 최소: {metrics.get('write_iops_min', 0):.2f}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">📖 Read IOPS</div>
+                <div class="metric-value">평균: {metrics.get('read_iops_mean', 0):.3f}</div>
+                <div class="metric-unit">최대: {metrics.get('read_iops_max', 0):.3f} | 최소: {metrics.get('read_iops_min', 0):.3f}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">🔗 연결 수</div>
+                <div class="metric-value">평균: {metrics.get('connections_mean', 0):.1f}개</div>
+                <div class="metric-unit">최대: {metrics.get('connections_max', 0):.0f}개 | 최소: {metrics.get('connections_min', 0):.0f}개</div>
+            </div>
+        </div>
+        """
+        
+        return html
+
     async def generate_comprehensive_performance_report(
         self,
         database_secret: str,
@@ -6401,11 +6690,6 @@ Knowledge Base 성능 최적화 가이드:
             LOGS_DIR
             / f"debug_log_performance_{db_instance_identifier}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         )
-
-        def debug_log(message):
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
-                f.flush()
 
         debug_log(
             f"종합 성능 진단 보고서 생성 시작 - 인스턴스: {db_instance_identifier}"
@@ -6446,11 +6730,11 @@ Knowledge Base 성능 최적화 가이드:
             csv_filename = Path(csv_file).name
             debug_log(f"CSV 파일명: {csv_filename}")
 
-            # 2. 성능 쿼리 수집
+            # 2. 성능 쿼리 수집 및 파일 추적
             debug_log("성능 쿼리 수집 시작")
-            slow_queries = await self.collect_slow_queries(
-                database_secret, db_instance_identifier
-            )
+            generated_files = []  # 생성된 파일들 추적
+            
+            slow_queries = await self.collect_slow_queries(database_secret)
             memory_queries = await self.collect_memory_intensive_queries(
                 database_secret, db_instance_identifier
             )
@@ -6460,15 +6744,49 @@ Knowledge Base 성능 최적화 가이드:
             temp_queries = await self.collect_temp_space_intensive_queries(
                 database_secret, db_instance_identifier
             )
+            
+            # SQL 파일들이 생성되었는지 확인하고 추적
+            sql_files = list(Path("sql").glob("*.sql")) if Path("sql").exists() else []
+            for sql_file in sql_files:
+                if any(keyword in sql_file.name.lower() for keyword in ['slow', 'cpu', 'memory', 'temp']):
+                    generated_files.append({"name": sql_file.name, "type": "SQL 쿼리", "path": f"../sql/{sql_file.name}"})
+            
             debug_log("성능 쿼리 수집 완료")
 
-            # 3. 메트릭 분석
+            # 3. 메트릭 분석 및 파일 추적
             debug_log("메트릭 분석 시작")
             summary = await self.get_metric_summary(csv_filename)
+            
+            # 핵심 메트릭 추출 - CSV 파일에서 직접 계산
+            key_metrics_dict = self.extract_key_metrics_from_csv(csv_filename)
+            key_metrics_html = self.format_metrics_as_html(key_metrics_dict)
+            
             correlation = await self.analyze_metric_correlation(
                 csv_filename, "CPUUtilization", 10
             )
-            outliers = await self.detect_metric_outliers(csv_filename, 2.0)
+            outliers = await self.detect_metric_outliers(csv_filename, 2.0, skip_html_report=True)
+            
+            # 아웃라이어 결과에서 링크 부분 제거 (종합보고서용)
+            if "📄 상세 보고서:" in outliers:
+                outliers_lines = outliers.split('\n')
+                filtered_lines = []
+                skip_next = False
+                for line in outliers_lines:
+                    if "📄 상세 보고서:" in line:
+                        break  # 이 라인부터는 모두 제외
+                    filtered_lines.append(line)
+                outliers = '\n'.join(filtered_lines).strip()
+            
+            # 임계값 모달 HTML 생성
+            metric_thresholds = self.load_metric_thresholds()
+            threshold_modal_html = self.generate_threshold_html(metric_thresholds)
+            
+            # 분석 결과 파일들 추적
+            data_files = list(Path("data").glob("*.csv")) if Path("data").exists() else []
+            for data_file in data_files:
+                if db_instance_identifier in data_file.name:
+                    generated_files.append({"name": data_file.name, "type": "분석 데이터", "path": f"../data/{data_file.name}"})
+            
             debug_log("메트릭 분석 완료")
 
             # 4. 상관관계 분석 (기존 함수 사용)
@@ -6540,20 +6858,32 @@ Knowledge Base 성능 최적화 가이드:
         .table th, .table td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
         .table th {{ background: #34495e; color: white; }}
         .table tr:hover {{ background: #f5f5f5; }}
-        .chart-container {{ text-align: center; margin: 20px 0; }}
         .recommendation {{ background: #e8f5e9; border-left: 4px solid #4caf50; padding: 15px; margin: 10px 0; border-radius: 5px; }}
         .issue {{ background: #ffebee; border-left: 4px solid #f44336; padding: 15px; margin: 10px 0; border-radius: 5px; }}
         .info-box {{ background: #e3f2fd; border-left: 4px solid #2196f3; padding: 15px; margin: 10px 0; border-radius: 5px; }}
+        .file-link {{ color: #007bff; text-decoration: none; font-weight: bold; }}
+        .file-link:hover {{ text-decoration: underline; color: #0056b3; }}
         .toc {{ background: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 30px; }}
         .toc ul {{ list-style: none; }}
         .toc li {{ margin: 5px 0; }}
         .toc a {{ color: #3498db; text-decoration: none; }}
         .toc a:hover {{ text-decoration: underline; }}
+        .btn {{ background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }}
+        .btn:hover {{ background: #0056b3; }}
+        .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); }}
+        .modal-content {{ background-color: #fefefe; margin: 5% auto; padding: 20px; border: none; border-radius: 10px; width: 80%; max-width: 800px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }}
+        .close {{ color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }}
+        .close:hover, .close:focus {{ color: black; text-decoration: none; }}
+        .threshold-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        .threshold-table th, .threshold-table td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+        .threshold-table th {{ background: #f8f9fa; font-weight: bold; }}
+        .threshold-table tr:hover {{ background: #f5f5f5; }}
         @media (max-width: 768px) {{
             .container {{ padding: 10px; }}
             .header {{ padding: 20px; }}
             .header h1 {{ font-size: 2em; }}
             .metric-grid {{ grid-template-columns: 1fr; }}
+            .modal-content {{ width: 95%; margin: 10% auto; }}
         }}
     </style>
 </head>
@@ -6589,7 +6919,28 @@ Knowledge Base 성능 최적화 가이드:
                 <div class="info-box">
                     <strong>분석 개요:</strong> {hours}시간 동안의 성능 데이터를 기반으로 한 종합 진단 결과입니다.
                 </div>
-                <pre style="background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto;">{summary}</pre>
+                
+                <h4>📊 인스턴스 정보</h4>
+                <div class="metric-grid">
+                    <div class="metric-card">
+                        <div class="metric-title">🗄️ 인스턴스 ID</div>
+                        <div class="metric-value">{db_instance_identifier}</div>
+                        <div class="metric-unit">{region}</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">📅 분석 기간</div>
+                        <div class="metric-value">{hours}</div>
+                        <div class="metric-unit">시간</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">📈 데이터 포인트</div>
+                        <div class="metric-value">288</div>
+                        <div class="metric-unit">개</div>
+                    </div>
+                </div>
+                
+                <h4>📈 핵심 성능 통계</h4>
+                {key_metrics_html}
             </div>
         </div>
 
@@ -6617,7 +6968,7 @@ Knowledge Base 성능 최적화 가이드:
                 
                 <h4>📊 상세 메트릭 정보</h4>
                 <div class="info-box">
-                    메트릭 데이터는 <strong>{csv_filename}</strong> 파일에 저장되었습니다.
+                    메트릭 데이터는 <strong><a href="file://{DATA_DIR / csv_filename}" target="_blank">{csv_filename}</a></strong> 파일에 저장되었습니다.
                 </div>
             </div>
         </div>
@@ -6644,6 +6995,12 @@ Knowledge Base 성능 최적화 가이드:
             <div class="section-content">
                 <h4>⚠️ 발견된 아웃라이어</h4>
                 <pre style="background: #f8f9fa; padding: 15px; border-radius: 5px; overflow-x: auto;">{outliers}</pre>
+                
+                <div style="margin: 15px 0;">
+                    <button class="btn" onclick="document.getElementById('thresholdModal').style.display='block'">
+                        📊 임계값 설정 보기
+                    </button>
+                </div>
                 
                 <div class="issue">
                     <strong>🔍 주의사항:</strong> 아웃라이어가 발견된 시점의 애플리케이션 로그와 시스템 이벤트를 함께 분석하여 근본 원인을 파악하세요.
@@ -6703,29 +7060,45 @@ Knowledge Base 성능 최적화 가이드:
         </div>
 
         <div class="section">
-            <div class="section-header">📁 첨부 파일 및 참고 자료</div>
+            <div class="section-header">📊 {db_instance_identifier} 인스턴스 보고서 정보</div>
             <div class="section-content">
-                <h4>📊 생성된 파일들</h4>
-                <ul style="margin-left: 20px;">
-                    <li><strong>메트릭 데이터:</strong> {csv_filename}</li>
-                    <li><strong>상관관계 분석:</strong> 포함됨</li>
-                    <li><strong>종합 보고서:</strong> {report_path.name}</li>
-                </ul>
-                
                 <div class="info-box">
-                    <strong>📞 문의 및 지원</strong><br>
-                    생성 도구: DB Assistant MCP Server<br>
-                    분석 엔진: Claude Sonnet 4 + AWS CloudWatch<br>
-                    보고서 버전: v2.0 
+                    <strong>📋 보고서 상세 정보:</strong>
+                    <ul style="margin-top: 10px; margin-left: 20px;">
+                        <li><strong>인스턴스 ID:</strong> {db_instance_identifier}</li>
+                        <li><strong>분석 기간:</strong> {hours}시간</li>
+                        <li><strong>리전:</strong> {region}</li>
+                        <li><strong>생성 시간:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</li>
+                        <li><strong>메트릭 데이터:</strong> <a href="file://{DATA_DIR / csv_filename}" target="_blank">{csv_filename}</a></li>
+                    </ul>
                 </div>
                 
                 <div style="text-align: center; margin-top: 30px; color: #7f8c8d; font-size: 0.9em;">
-                    <em>이 보고서는 {hours}시간 동안의 성능 데이터를 기반으로 생성되었습니다.<br>
+                    <em>이 보고서는 {db_instance_identifier} 인스턴스의 {hours}시간 동안의 성능 데이터를 기반으로 생성되었습니다.<br>
                     정확한 성능 분석을 위해서는 최소 1주일 이상의 데이터 수집을 권장합니다.</em>
                 </div>
             </div>
         </div>
     </div>
+    
+    <!-- 임계값 설정 모달 -->
+    {threshold_modal_html}
+    
+    <script>
+        // 모달 제어 JavaScript
+        var modal = document.getElementById('thresholdModal');
+        var span = document.getElementsByClassName('close')[0];
+        
+        span.onclick = function() {{
+            modal.style.display = 'none';
+        }}
+        
+        window.onclick = function(event) {{
+            if (event.target == modal) {{
+                modal.style.display = 'none';
+            }}
+        }}
+    </script>
 </body>
 </html>"""
 
@@ -6745,7 +7118,7 @@ Knowledge Base 성능 최적화 가이드:
 
 📁 **생성된 파일들:**
 • 종합 보고서: {report_path.name}
-• 메트릭 데이터: {csv_filename}
+• 메트릭 데이터: <a href="file://{DATA_DIR / csv_filename}" target="_blank">{csv_filename}</a>
 • 상관관계 분석: 포함됨
 
 📈 **포함된 분석:**
@@ -6791,11 +7164,6 @@ Knowledge Base 성능 최적화 가이드:
             LOGS_DIR
             / f"debug_log_cluster_{db_cluster_identifier}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         )
-
-        def debug_log(message):
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
-                f.flush()
 
         try:
             debug_log(f"클러스터 성능 보고서 생성 시작: {db_cluster_identifier}")
@@ -6913,10 +7281,19 @@ Knowledge Base 성능 최적화 가이드:
                         f"database_metrics_{reader_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                     )
             debug_log("클러스터 레벨 분석 시작")
-            # 3. 클러스터 레벨 분석
+            # 3. 클러스터 레벨 메트릭 수집
+            cluster_level_metrics = await self._collect_cluster_level_metrics(
+                actual_cluster_id, region, hours
+            )
 
+            # 4. 클러스터 이벤트 수집 (최근 7일)
+            cluster_events = await self._collect_cluster_events(
+                actual_cluster_id, region, 7 * 24  # 7일
+            )
+
+            # 5. 클러스터 레벨 분석
             cluster_analysis = await self._analyze_cluster_metrics(
-                cluster_metrics, cluster_info
+                cluster_metrics, cluster_info, cluster_level_metrics, cluster_events
             )
 
             # 4. 클러스터 통합 보고서 생성
@@ -6928,7 +7305,12 @@ Knowledge Base 성능 최적화 가이드:
             report_path = Path.cwd() / "output" / report_filename
 
             html_content = await self._generate_cluster_html_report(
-                cluster_info, instance_reports, cluster_analysis, timestamp
+                cluster_info,
+                instance_reports,
+                cluster_analysis,
+                timestamp,
+                cluster_level_metrics,
+                cluster_events,
             )
 
             # 보고서 저장
@@ -6947,7 +7329,7 @@ Knowledge Base 성능 최적화 가이드:
 • 분석 기간: 최근 {hours}시간
 
 📊 생성된 보고서:
-• 🎯 클러스터 통합 보고서: {report_path}
+• 🎯 클러스터 통합 보고서: file://{report_path}
 • 📋 개별 인스턴스 상세 보고서: {len(instance_reports)}개
 
 🔍 주요 분석 내용:
@@ -6965,8 +7347,160 @@ Knowledge Base 성능 최적화 가이드:
             debug_log(f"클러스터 성능 보고서 생성 오류: {e}")
             return f"❌ 클러스터 보고서 생성 실패: {str(e)}\n📄 디버그 로그: {debug_log_path}"
 
+    async def _collect_cluster_level_metrics(
+        self, cluster_id: str, region: str, hours: int
+    ) -> Dict:
+        """클러스터 레벨 메트릭 수집"""
+        try:
+            cloudwatch = boto3.client("cloudwatch", region_name=region)
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=hours)
+
+            # 클러스터 레벨 메트릭 정의
+            cluster_metrics = [
+                "CPUUtilization",
+                "DatabaseConnections",
+                "FreeableMemory",
+                "ReadIOPS",
+                "WriteIOPS",
+                "ReadLatency",
+                "WriteLatency",
+                "NetworkReceiveThroughput",
+                "NetworkTransmitThroughput",
+                "AuroraReplicaLag",
+                "AuroraReplicaLagMaximum",
+                "AuroraReplicaLagMinimum",
+                "VolumeBytesUsed",
+                "VolumeReadIOPs",
+                "VolumeWriteIOPs",
+            ]
+
+            metrics_data = {}
+
+            for metric_name in cluster_metrics:
+                try:
+                    response = cloudwatch.get_metric_statistics(
+                        Namespace="AWS/RDS",
+                        MetricName=metric_name,
+                        Dimensions=[
+                            {"Name": "DBClusterIdentifier", "Value": cluster_id}
+                        ],
+                        StartTime=start_time,
+                        EndTime=end_time,
+                        Period=300,  # 5분 간격
+                        Statistics=["Average", "Maximum", "Minimum"],
+                    )
+
+                    if response["Datapoints"]:
+                        metrics_data[metric_name] = response["Datapoints"]
+
+                except Exception as e:
+                    logger.warning(f"클러스터 메트릭 수집 실패 {metric_name}: {e}")
+
+            return metrics_data
+
+        except Exception as e:
+            logger.error(f"클러스터 메트릭 수집 오류: {e}")
+            return {}
+
+    async def _collect_cluster_events(
+        self, cluster_id: str, region: str, hours: int
+    ) -> List[Dict]:
+        """클러스터 이벤트 수집 (최근 N시간)"""
+        try:
+            rds_client = boto3.client("rds", region_name=region)
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=hours)
+
+            # 클러스터 이벤트 조회
+            response = rds_client.describe_events(
+                SourceIdentifier=cluster_id,
+                SourceType="db-cluster",
+                StartTime=start_time,
+                EndTime=end_time,
+            )
+
+            events = []
+            for event in response.get("Events", []):
+                events.append(
+                    {
+                        "date": event["Date"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "message": event["Message"],
+                        "source_id": event.get("SourceId", ""),
+                        "event_categories": event.get("EventCategories", []),
+                        "severity": self._categorize_event_severity(event["Message"]),
+                    }
+                )
+
+            # 인스턴스 레벨 이벤트도 수집
+            cluster_info = rds_client.describe_db_clusters(
+                DBClusterIdentifier=cluster_id
+            )["DBClusters"][0]
+
+            for member in cluster_info["DBClusterMembers"]:
+                instance_id = member["DBInstanceIdentifier"]
+                try:
+                    instance_response = rds_client.describe_events(
+                        SourceIdentifier=instance_id,
+                        SourceType="db-instance",
+                        StartTime=start_time,
+                        EndTime=end_time,
+                    )
+
+                    for event in instance_response.get("Events", []):
+                        events.append(
+                            {
+                                "date": event["Date"].strftime("%Y-%m-%d %H:%M:%S"),
+                                "message": f"[{instance_id}] {event['Message']}",
+                                "source_id": instance_id,
+                                "event_categories": event.get("EventCategories", []),
+                                "severity": self._categorize_event_severity(
+                                    event["Message"]
+                                ),
+                            }
+                        )
+
+                except Exception as e:
+                    logger.warning(f"인스턴스 이벤트 수집 실패 {instance_id}: {e}")
+
+            # 날짜순 정렬
+            events.sort(key=lambda x: x["date"], reverse=True)
+            return events
+
+        except Exception as e:
+            logger.error(f"클러스터 이벤트 수집 오류: {e}")
+            return []
+
+    def _categorize_event_severity(self, message: str) -> str:
+        """이벤트 메시지 기반 심각도 분류"""
+        message_lower = message.lower()
+
+        if any(
+            keyword in message_lower
+            for keyword in [
+                "failed",
+                "error",
+                "critical",
+                "fatal",
+                "crash",
+                "corruption",
+            ]
+        ):
+            return "HIGH"
+        elif any(
+            keyword in message_lower
+            for keyword in ["warning", "slow", "timeout", "retry", "restart", "reboot"]
+        ):
+            return "MEDIUM"
+        else:
+            return "LOW"
+
     async def _analyze_cluster_metrics(
-        self, cluster_metrics: Dict, cluster_info: Dict
+        self,
+        cluster_metrics: Dict,
+        cluster_info: Dict,
+        cluster_level_metrics: Dict = None,
+        cluster_events: List = None,
     ) -> Dict:
         """클러스터 레벨 메트릭 분석"""
         try:
@@ -6985,24 +7519,26 @@ Knowledge Base 성능 최적화 가이드:
 
             # 각 인스턴스의 메트릭 로드 및 비교 - data 폴더에서 직접 찾기
             metrics_data = {}
-            
+
             # 클러스터 멤버에서 인스턴스 ID 가져오기
             for member in cluster_info["DBClusterMembers"]:
                 instance_id = member["DBInstanceIdentifier"]
-                
+
                 # data 폴더에서 해당 인스턴스의 최신 CSV 파일 찾기
                 data_dir = Path("data")
                 csv_files = list(data_dir.glob(f"database_metrics_{instance_id}_*.csv"))
-                
+
                 if csv_files:
                     # 가장 최신 파일 선택 (파일명의 타임스탬프 기준)
-                    latest_csv = max(csv_files, key=lambda x: x.name.split('_')[-1])
+                    latest_csv = max(csv_files, key=lambda x: x.name.split("_")[-1])
                     logger.info(f"메트릭 파일 발견: {instance_id} -> {latest_csv}")
-                    
+
                     try:
                         df = pd.read_csv(latest_csv)
                         metrics_data[instance_id] = df
-                        logger.info(f"메트릭 파일 로드 성공: {instance_id} ({len(df)} 행)")
+                        logger.info(
+                            f"메트릭 파일 로드 성공: {instance_id} ({len(df)} 행)"
+                        )
                     except Exception as e:
                         logger.warning(f"메트릭 파일 로드 실패 {latest_csv}: {e}")
                 else:
@@ -7023,7 +7559,9 @@ Knowledge Base 성능 최적화 가이드:
                         for m in cluster_info["DBClusterMembers"]
                     )
 
-                    logger.info(f"인스턴스 역할 확인: {instance_id} -> {'Writer' if is_writer else 'Reader'}")
+                    logger.info(
+                        f"인스턴스 역할 확인: {instance_id} -> {'Writer' if is_writer else 'Reader'}"
+                    )
 
                     if is_writer:
                         writer_data = df
@@ -7042,7 +7580,9 @@ Knowledge Base 성능 최적화 가이드:
                         logger.error(f"부하 분산 분석 오류: {e}")
                         analysis["load_distribution"] = {}
                 else:
-                    logger.warning(f"부하 분산 분석 불가: writer_data={writer_data is not None}, reader_data={len(reader_data)}")
+                    logger.warning(
+                        f"부하 분산 분석 불가: writer_data={writer_data is not None}, reader_data={len(reader_data)}"
+                    )
 
                 # 리소스 사용률 비교
                 try:
@@ -7055,7 +7595,9 @@ Knowledge Base 성능 최적화 가이드:
                     logger.error(f"리소스 사용률 비교 오류: {e}")
                     analysis["resource_comparison"] = {}
             else:
-                logger.warning(f"분석을 위한 메트릭 데이터 부족: {len(metrics_data)}개 (최소 2개 필요)")
+                logger.warning(
+                    f"분석을 위한 메트릭 데이터 부족: {len(metrics_data)}개 (최소 2개 필요)"
+                )
 
             return analysis
 
@@ -7132,19 +7674,22 @@ Knowledge Base 성능 최적화 가이드:
             comparison = {}
 
             for instance_id, df in metrics_data.items():
+                # 메모리 사용률 계산 (FreeableMemory 기반)
+                memory_usage_percent = 0
+                if "FreeableMemory" in df.columns and not df["FreeableMemory"].empty:
+                    freeable_memory = df["FreeableMemory"].mean()
+                    # 가정: 총 메모리 16GB (16 * 1024 * 1024 * 1024 bytes)
+                    total_memory = 16 * 1024 * 1024 * 1024
+                    memory_usage_percent = ((total_memory - freeable_memory) / total_memory) * 100
+
                 comparison[instance_id] = {
                     "cpu_avg": (
                         df["CPUUtilization"].mean()
                         if "CPUUtilization" in df.columns
                         else 0
                     ),
-                    "memory_usage": (
-                        (1 - df["FreeableMemory"].mean() / df["FreeableMemory"].max())
-                        * 100
-                        if "FreeableMemory" in df.columns
-                        else 0
-                    ),
-                    "connections": (
+                    "memory_usage_percent": memory_usage_percent,
+                    "connections_avg": (
                         df["DatabaseConnections"].mean()
                         if "DatabaseConnections" in df.columns
                         else 0
@@ -7163,27 +7708,24 @@ Knowledge Base 성능 최적화 가이드:
             return {}
 
     async def _generate_cluster_html_report(
-        self, cluster_info, instance_reports, cluster_analysis, timestamp
+        self,
+        cluster_info,
+        instance_reports,
+        cluster_analysis,
+        timestamp,
+        cluster_level_metrics=None,
+        cluster_events=None,
     ):
-        """클러스터 통합 HTML 보고서 생성"""
+        """클러스터 통합 HTML 보고서 생성 - 기존 형태로 단순화"""
 
         cluster_id = cluster_info["DBClusterIdentifier"]
         engine_info = f"{cluster_info.get('Engine', 'N/A')} {cluster_info.get('EngineVersion', 'N/A')}"
 
         # 인스턴스 링크 생성
         instance_links = []
-        session_logger = logging.getLogger(
-            "session_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        )
-        session_logger.info(f"인스턴스 보고서 개수: {len(instance_reports)}")
         for instance_id, report_info in instance_reports.items():
-            session_logger.info(
-                f"처리 중인 인스턴스: {instance_id}, 역할: {report_info.get('role', 'Unknown')}"
-            )
             role = report_info["role"]
-            # 상세 보고서 파일명 추출
             report_text = report_info["report"]
-            session_logger.info(f"보고서 텍스트 일부: {report_text[:200]}...")
             if "comprehensive_performance_report_" in report_text:
                 import re
 
@@ -7192,7 +7734,6 @@ Knowledge Base 성능 최적화 가이드:
                 )
                 if match:
                     report_filename = match.group(0)
-                    session_logger.info(f"매칭된 파일명: {report_filename}")
                     instance_links.append(
                         f"""
                     <tr>
@@ -7202,24 +7743,14 @@ Knowledge Base 성능 최적화 가이드:
                     </tr>
                     """
                     )
-                else:
-                    session_logger.warning(f"파일명 매칭 실패: {instance_id}")
-            else:
-                session_logger.warning(
-                    f"comprehensive_performance_report_ 문자열 없음: {instance_id}"
-                )
 
-        session_logger.info(f"생성된 인스턴스 링크 개수: {len(instance_links)}")
+        # 부하 분산 분석 HTML 생성 (제거)
+        load_analysis_html = ""
 
-        # 부하 분산 분석 결과
-        load_analysis = cluster_analysis.get("load_distribution", {})
-        balance_score = load_analysis.get("balance_score", 0)
+        # 리소스 비교 HTML 생성
+        resource_comparison_html = self._generate_resource_comparison_html(cluster_analysis.get('resource_comparison', {}))
 
-        # 리소스 비교 차트 데이터
-        resource_comparison = cluster_analysis.get("resource_comparison", {})
-
-        html_content = f"""
-<!DOCTYPE html>
+        return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -7252,14 +7783,10 @@ Knowledge Base 성능 최적화 가이드:
         .detail-link {{ color: #007bff; text-decoration: none; font-weight: bold; }}
         .detail-link:hover {{ text-decoration: underline; }}
         
-        .balance-score {{ text-align: center; margin: 20px 0; }}
-        .balance-meter {{ width: 200px; height: 200px; margin: 0 auto; position: relative; }}
-        .balance-value {{ font-size: 2em; font-weight: bold; color: {self._get_balance_color(balance_score)}; }}
-        
         .recommendation {{ background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 8px; padding: 15px; margin: 15px 0; }}
         .recommendation h4 {{ margin: 0 0 10px 0; color: #856404; }}
         
-        .resource-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }}
+        .resource-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin: 20px 0; }}
         .resource-card {{ background: #f8f9fa; border-radius: 8px; padding: 15px; }}
         .resource-card h4 {{ margin: 0 0 15px 0; color: #495057; }}
         .metric-bar {{ background: #e9ecef; height: 20px; border-radius: 10px; margin: 5px 0; position: relative; }}
@@ -7286,19 +7813,19 @@ Knowledge Base 성능 최적화 가이드:
                 <div>Writer: 1개, Reader: {len([m for m in cluster_info['DBClusterMembers'] if not m['IsClusterWriter']])}개</div>
             </div>
             <div class="summary-card">
-                <h3>⚖️ 부하 분산 점수</h3>
-                <div class="value" style="color: {self._get_balance_color(balance_score)}">{balance_score}/100</div>
-                <div>{self._get_balance_status(balance_score)}</div>
-            </div>
-            <div class="summary-card">
                 <h3>🔄 클러스터 상태</h3>
-                <div class="value" style="color: #28a745">{cluster_info.get('Status', 'N/A').upper()}</div>
-                <div>Multi-AZ: {'Yes' if cluster_info.get('MultiAZ') else 'No'}</div>
+                <div class="value" style="color: #28a745">{cluster_info.get('Status', 'AVAILABLE')}</div>
+                <div>Multi-AZ: {'Yes' if cluster_info.get('MultiAZ', False) else 'No'}</div>
             </div>
             <div class="summary-card">
                 <h3>🔐 보안 설정</h3>
-                <div class="value">{'🔒' if cluster_info.get('StorageEncrypted') else '🔓'}</div>
-                <div>암호화: {'활성화' if cluster_info.get('StorageEncrypted') else '비활성화'}</div>
+                <div class="value">🔒</div>
+                <div>암호화: {'활성화' if cluster_info.get('StorageEncrypted', False) else '비활성화'}</div>
+            </div>
+            <div class="summary-card">
+                <h3>💾 백업 설정</h3>
+                <div class="value">{cluster_info.get('BackupRetentionPeriod', 0)}일</div>
+                <div>자동 백업: {'활성화' if cluster_info.get('BackupRetentionPeriod', 0) > 0 else '비활성화'}</div>
             </div>
         </div>
         
@@ -7324,34 +7851,169 @@ Knowledge Base 성능 최적화 가이드:
             </div>
         </div>
         
-        <div class="section">
-            <div class="section-header">⚖️ 부하 분산 분석</div>
-            <div class="section-content">
-                {self._generate_load_distribution_html(load_analysis)}
-            </div>
-        </div>
+        {load_analysis_html}
         
+        {resource_comparison_html}
+    </div>
+</body>
+</html>"""
+
+    def _generate_load_analysis_html(self, load_distribution: Dict) -> str:
+        """부하 분산 분석 HTML 생성 (비활성화)"""
+        return ""
+
+    def _generate_resource_comparison_html(self, resource_comparison: Dict) -> str:
+        """리소스 비교 HTML 생성"""
+        if not resource_comparison:
+            return ""
+        
+        cards_html = ""
+        for instance_id, metrics in resource_comparison.items():
+            cpu_usage = metrics.get('cpu_avg', 0)
+            memory_usage = metrics.get('memory_usage_percent', 0)
+            connections_avg = metrics.get('connections_avg', 0)
+            read_iops = metrics.get('read_iops', 0)
+            write_iops = metrics.get('write_iops', 0)
+            
+            cards_html += f"""
+            <div class="resource-card">
+                <h4>{instance_id}</h4>
+                <div class="metric-label">CPU 사용률: {cpu_usage:.1f}%</div>
+                <div class="metric-bar">
+                    <div class="metric-fill" style="width: {min(cpu_usage, 100)}%; background: #007bff;"></div>
+                </div>
+                
+                <div class="metric-label">메모리 사용률: {memory_usage:.1f}%</div>
+                <div class="metric-bar">
+                    <div class="metric-fill" style="width: {min(memory_usage, 100)}%; background: #28a745;"></div>
+                </div>
+                
+                <div class="metric-label">평균 연결 수: {connections_avg:.1f}</div>
+                <div class="metric-label">Read IOPS: {read_iops:.1f}</div>
+                <div class="metric-label">Write IOPS: {write_iops:.1f}</div>
+            </div>"""
+        
+        return f"""
         <div class="section">
             <div class="section-header">📊 인스턴스별 리소스 사용률 비교</div>
             <div class="section-content">
                 <div class="resource-grid">
-                    {self._generate_resource_comparison_html(resource_comparison)}
+                    {cards_html}
                 </div>
             </div>
-        </div>
-        
-        <div class="section">
-            <div class="section-header">💡 클러스터 최적화 권장사항</div>
-            <div class="section-content">
-                {self._generate_cluster_recommendations(cluster_analysis, cluster_info)}
-            </div>
-        </div>
-    </div>
-</body>
-</html>
+        </div>"""
+
+    def _generate_cluster_metrics_table(self, cluster_metrics: Dict) -> str:
+        """클러스터 메트릭 표 HTML 생성"""
+        if not cluster_metrics:
+            return '<div class="no-data">클러스터 메트릭 데이터가 없습니다.</div>'
+
+        # 주요 메트릭들에 대한 통계 계산
+        important_metrics = [
+            ("CPUUtilization", "CPU 사용률", "%"),
+            ("FreeableMemory", "사용 가능한 메모리", "MB"),
+            ("ReadIOPS", "읽기 IOPS", "IOPS"),
+            ("WriteIOPS", "쓰기 IOPS", "IOPS"),
+            ("DatabaseConnections", "데이터베이스 연결 수", "개"),
+            ("AuroraReplicaLag", "Aurora 복제 지연", "ms"),
+        ]
+
+        table_html = """
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>메트릭</th>
+                    <th>평균</th>
+                    <th>최대값</th>
+                    <th>최소값</th>
+                    <th>단위</th>
+                </tr>
+            </thead>
+            <tbody>
         """
 
-        return html_content
+        for metric_name, display_name, unit in important_metrics:
+            if metric_name in cluster_metrics:
+                datapoints = cluster_metrics[metric_name]
+
+                if datapoints:
+                    avg_values = [float(point["Average"]) for point in datapoints]
+                    max_values = [float(point["Maximum"]) for point in datapoints]
+                    min_values = [float(point["Minimum"]) for point in datapoints]
+
+                    overall_avg = sum(avg_values) / len(avg_values)
+                    overall_max = max(max_values)
+                    overall_min = min(min_values)
+
+                    # 메모리는 MB 단위로 변환
+                    if metric_name == "FreeableMemory":
+                        overall_avg = overall_avg / (1024 * 1024)
+                        overall_max = overall_max / (1024 * 1024)
+                        overall_min = overall_min / (1024 * 1024)
+
+                    table_html += f"""
+                    <tr>
+                        <td class="metric-name">{display_name}</td>
+                        <td class="metric-value">{overall_avg:.2f}</td>
+                        <td class="metric-value">{overall_max:.2f}</td>
+                        <td class="metric-value">{overall_min:.2f}</td>
+                        <td>{unit}</td>
+                    </tr>
+                    """
+
+        table_html += "</tbody></table>"
+
+        if len([m for m, _, _ in important_metrics if m in cluster_metrics]) == 0:
+            return '<div class="no-data">표시할 메트릭 데이터가 없습니다.</div>'
+
+        return table_html
+
+    def _generate_events_table(self, events: List[Dict]) -> str:
+        """이벤트 테이블 HTML 생성"""
+        if not events:
+            return '<div class="no-data">최근 7일간 이벤트가 없습니다.</div>'
+
+        # 최근 20개 이벤트만 표시
+        recent_events = events[:20]
+
+        table_html = """
+        <table class="events-table">
+            <thead>
+                <tr>
+                    <th>일시</th>
+                    <th>심각도</th>
+                    <th>소스</th>
+                    <th>메시지</th>
+                    <th>카테고리</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+
+        for event in recent_events:
+            severity_class = event["severity"].lower()
+            categories = ", ".join(event.get("event_categories", []))
+
+            table_html += f"""
+            <tr>
+                <td>{event['date']}</td>
+                <td><span class="severity-badge {event['severity']}">{event['severity']}</span></td>
+                <td>{event.get('source_id', 'N/A')}</td>
+                <td>{event['message']}</td>
+                <td>{categories}</td>
+            </tr>
+            """
+
+        table_html += "</tbody></table>"
+
+        if len(events) > 20:
+            table_html += f'<div style="text-align: center; margin-top: 10px; color: #6c757d;">총 {len(events)}개 이벤트 중 최근 20개만 표시</div>'
+
+        return table_html
+
+    def _generate_chart_scripts(self, cluster_metrics: Dict) -> str:
+        """차트 생성 비활성화 - 간단한 메트릭 표시만"""
+        return ""
 
     def _get_balance_color(self, score):
         """부하 분산 점수에 따른 색상 반환"""
@@ -7407,46 +8069,6 @@ Knowledge Base 성능 최적화 가이드:
                     CPU: {reader['cpu']:.1f}% | 연결 수: {reader['connections']:.1f}
                 </div>
                 """
-
-        return html
-
-    def _generate_resource_comparison_html(self, resource_comparison):
-        """리소스 비교 HTML 생성"""
-        if not resource_comparison:
-            return """
-            <div class="recommendation">
-                <h4 style="color: #dc3545;">⚠️ 리소스 비교 데이터 없음</h4>
-                <p><strong>원인:</strong> 인스턴스별 메트릭 데이터 수집 또는 분석 과정에서 문제가 발생했습니다.</p>
-                <p><strong>확인사항:</strong></p>
-                <ul>
-                    <li>각 인스턴스의 CloudWatch 메트릭 수집 상태 확인</li>
-                    <li>메트릭 데이터 파일이 올바르게 생성되었는지 확인</li>
-                    <li>분석 라이브러리(pandas, numpy)가 정상 설치되어 있는지 확인</li>
-                </ul>
-                <p><strong>권장조치:</strong> 개별 인스턴스 보고서에서 각 인스턴스의 상세 메트릭을 확인하세요.</p>
-            </div>
-            """
-
-        html = ""
-        for instance_id, metrics in resource_comparison.items():
-            html += f"""
-            <div class="resource-card">
-                <h4>{instance_id}</h4>
-                <div class="metric-label">CPU 사용률: {metrics['cpu_avg']:.1f}%</div>
-                <div class="metric-bar">
-                    <div class="metric-fill" style="width: {min(metrics['cpu_avg'], 100)}%; background: #007bff;"></div>
-                </div>
-                
-                <div class="metric-label">메모리 사용률: {metrics['memory_usage']:.1f}%</div>
-                <div class="metric-bar">
-                    <div class="metric-fill" style="width: {min(metrics['memory_usage'], 100)}%; background: #28a745;"></div>
-                </div>
-                
-                <div class="metric-label">평균 연결 수: {metrics['connections']:.1f}</div>
-                <div class="metric-label">Read IOPS: {metrics['read_iops']:.1f}</div>
-                <div class="metric-label">Write IOPS: {metrics['write_iops']:.1f}</div>
-            </div>
-            """
 
         return html
 
@@ -7562,7 +8184,7 @@ Knowledge Base 성능 최적화 가이드:
     ) -> str:
         """CloudWatch에서 데이터베이스 메트릭 수집"""
         if not ANALYSIS_AVAILABLE:
-            return "❌ 분석 라이브러리가 설치되지 않았습니다. pip install pandas numpy matplotlib scikit-learn을 실행해주세요."
+            return "❌ 분석 라이브러리가 설치되지 않았습니다. pip install pandas numpy scikit-learn을 실행해주세요."
 
         try:
             if not self.setup_cloudwatch_client(region):
@@ -7589,6 +8211,20 @@ Knowledge Base 성능 최적화 가이드:
                 logger.debug(f"{db_instance_identifier}는 인스턴스 ID입니다")
             except Exception as e:
                 logger.debug(f"클러스터 확인 실패: {str(e)}")
+
+            # 인스턴스 클래스 정보 수집
+            try:
+                instance_response = rds_client.describe_db_instances(
+                    DBInstanceIdentifier=db_instance_identifier
+                )
+                if instance_response["DBInstances"]:
+                    instance_class = instance_response["DBInstances"][0]["DBInstanceClass"]
+                    # 현재 인스턴스 클래스를 저장하여 동적 임계값에 사용
+                    self.current_instance_class = instance_class
+                    logger.info(f"인스턴스 클래스: {instance_class}")
+            except Exception as e:
+                logger.warning(f"인스턴스 클래스 정보 수집 실패: {str(e)}")
+                self.current_instance_class = 'r5.large'  # 기본값
 
             if not metrics:
                 metrics = self.default_metrics
@@ -7689,32 +8325,99 @@ Knowledge Base 성능 최적화 가이드:
             for metric, correlation in top_correlations.items():
                 result += f"• {metric}: {correlation:.4f}\n"
 
-            # 시각화
-            plt.figure(figsize=(12, 6))
-            top_correlations.plot(kind="bar")
-            plt.title(f"Top {top_n} Metrics Correlated with {target_metric}")
-            plt.xlabel("Metrics")
-            plt.ylabel("Correlation Coefficient")
-            plt.xticks(rotation=45, ha="right")
-            plt.tight_layout()
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            graph_file = (
-                OUTPUT_DIR / f"correlation_analysis_{target_metric}_{timestamp}.png"
-            )
-            plt.savefig(graph_file, dpi=300, bbox_inches="tight")
-            plt.close()
-
-            result += f"\n📈 상관관계 그래프가 저장되었습니다: {graph_file}"
+            # 그래프 생성 제거됨 - 텍스트 결과만 반환
             return result
 
         except Exception as e:
             return f"상관관계 분석 중 오류 발생: {str(e)}"
 
+    def load_metric_thresholds(self) -> dict:
+        """input 폴더에서 최신 임계값 설정 파일 로드"""
+        try:
+            input_dir = Path(__file__).parent / "input"
+            if not input_dir.exists():
+                input_dir.mkdir(exist_ok=True)
+            
+            # metric_thresholds_*.txt 파일 중 최신 파일 찾기
+            threshold_files = list(input_dir.glob("metric_thresholds_*.txt"))
+            if not threshold_files:
+                return self.get_default_thresholds()
+            
+            latest_file = max(threshold_files, key=lambda f: f.stat().st_mtime)
+            
+            thresholds = {}
+            current_metric = None
+            
+            with open(latest_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    if line.startswith('[') and line.endswith(']'):
+                        current_metric = line[1:-1]
+                        thresholds[current_metric] = {}
+                    elif '=' in line and current_metric:
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip()
+                        
+                        # 숫자 변환
+                        if key in ['min', 'max', 'high_threshold', 'low_threshold', 'spike_factor']:
+                            try:
+                                thresholds[current_metric][key] = float(value) if value != 'None' else None
+                            except ValueError:
+                                thresholds[current_metric][key] = None
+                        else:
+                            thresholds[current_metric][key] = value
+            
+            return thresholds
+            
+        except Exception as e:
+            debug_log(f"임계값 파일 로드 실패: {e}")
+            return self.get_default_thresholds()
+    
+    def get_default_thresholds(self) -> dict:
+        """기본 임계값 반환"""
+        return {
+            'CPUUtilization': {'min': 0, 'max': 100, 'high_threshold': 80, 'method': 'absolute'},
+            'DatabaseConnections': {'min': 0, 'max': None, 'spike_factor': 3.0, 'method': 'spike'},
+            'FreeableMemory': {'min': 0, 'max': None, 'low_threshold': 0.1, 'method': 'percentage'},
+            'ReadLatency': {'min': 0, 'max': None, 'high_threshold': 0.01, 'method': 'absolute'},
+            'WriteLatency': {'min': 0, 'max': None, 'high_threshold': 0.01, 'method': 'absolute'},
+            'ReadIOPS': {'min': 0, 'max': None, 'spike_factor': 5.0, 'method': 'spike'},
+            'WriteIOPS': {'min': 0, 'max': None, 'spike_factor': 5.0, 'method': 'spike'},
+            'NetworkReceiveThroughput': {'min': 0, 'max': None, 'spike_factor': 3.0, 'method': 'spike'},
+            'NetworkTransmitThroughput': {'min': 0, 'max': None, 'spike_factor': 3.0, 'method': 'spike'},
+            'DBLoad': {'min': 0, 'max': None, 'high_threshold': 2.0, 'method': 'dynamic'},
+            'DBLoadCPU': {'min': 0, 'max': None, 'high_threshold': 2.0, 'method': 'dynamic'},
+            'DBLoadNonCPU': {'min': 0, 'max': None, 'high_threshold': 1.0, 'method': 'dynamic'},
+            'BufferCacheHitRatio': {'min': 0, 'max': 100, 'low_threshold': 80, 'method': 'percentage'}
+        }
+
+    def get_dynamic_dbload_threshold(self, instance_class: str) -> float:
+        """인스턴스 클래스별 DBLoad 임계값 반환"""
+        # vCPU 수 기반 임계값 설정
+        vcpu_mapping = {
+            # t3/t4g 시리즈
+            't3.micro': 2, 't3.small': 2, 't3.medium': 2, 't3.large': 2, 't3.xlarge': 4, 't3.2xlarge': 8,
+            't4g.micro': 2, 't4g.small': 2, 't4g.medium': 2, 't4g.large': 2, 't4g.xlarge': 4, 't4g.2xlarge': 8,
+            # r5/r6i 시리즈
+            'r5.large': 2, 'r5.xlarge': 4, 'r5.2xlarge': 8, 'r5.4xlarge': 16, 'r5.8xlarge': 32, 'r5.12xlarge': 48, 'r5.16xlarge': 64, 'r5.24xlarge': 96,
+            'r6i.large': 2, 'r6i.xlarge': 4, 'r6i.2xlarge': 8, 'r6i.4xlarge': 16, 'r6i.8xlarge': 32, 'r6i.12xlarge': 48, 'r6i.16xlarge': 64, 'r6i.24xlarge': 96, 'r6i.32xlarge': 128,
+            # m5/m6i 시리즈
+            'm5.large': 2, 'm5.xlarge': 4, 'm5.2xlarge': 8, 'm5.4xlarge': 16, 'm5.8xlarge': 32, 'm5.12xlarge': 48, 'm5.16xlarge': 64, 'm5.24xlarge': 96,
+            'm6i.large': 2, 'm6i.xlarge': 4, 'm6i.2xlarge': 8, 'm6i.4xlarge': 16, 'm6i.8xlarge': 32, 'm6i.12xlarge': 48, 'm6i.16xlarge': 64, 'm6i.24xlarge': 96, 'm6i.32xlarge': 128,
+        }
+        
+        vcpu_count = vcpu_mapping.get(instance_class, 2)  # 기본값 2 vCPU
+        # DBLoad 임계값 = vCPU 수 * 0.8 (80% 활용률 기준)
+        return vcpu_count * 0.8
+
     async def detect_metric_outliers(
-        self, csv_file: str, std_threshold: float = 2.0
+        self, csv_file: str, std_threshold: float = 3.0, skip_html_report: bool = False
     ) -> str:
-        """아웃라이어 탐지"""
+        """개선된 아웃라이어 탐지 - 메트릭별 맞춤 기준 적용"""
         if not ANALYSIS_AVAILABLE:
             return "❌ 분석 라이브러리가 설치되지 않았습니다."
 
@@ -7732,52 +8435,255 @@ Knowledge Base 성능 최적화 가이드:
             df = pd.read_csv(csv_path, index_col="Timestamp", parse_dates=True)
             df = df.dropna()
 
-            result = f"🚨 아웃라이어 탐지 결과 (임계값: ±{std_threshold}σ):\n\n"
+            # 임계값 파일에서 로드
+            metric_thresholds = self.load_metric_thresholds()
 
+            result = f"🔍 개선된 아웃라이어 탐지 결과:\n\n"
             outlier_summary = []
+            critical_issues = []
 
-            # 각 메트릭에 대해 아웃라이어 탐지
+            # 각 메트릭에 대해 맞춤 아웃라이어 탐지
             for column in df.columns:
                 series = df[column]
-                mean = series.mean()
-                std = series.std()
-                lower_bound = mean - std_threshold * std
-                upper_bound = mean + std_threshold * std
+                config = metric_thresholds.get(column, {'method': 'iqr'})
+                outliers = pd.Series(dtype=float)
+                
+                if config['method'] == 'dynamic':
+                    # 동적 임계값 기준 (DBLoad 등)
+                    if column in ['DBLoad', 'DBLoadCPU', 'DBLoadNonCPU']:
+                        instance_class = getattr(self, 'current_instance_class', 'r5.large')
+                        dynamic_threshold = self.get_dynamic_dbload_threshold(instance_class)
+                        outliers = series[series > dynamic_threshold]
+                    else:
+                        # 다른 메트릭은 기본 임계값 사용
+                        if 'high_threshold' in config:
+                            outliers = series[series > config['high_threshold']]
+                        
+                elif config['method'] == 'absolute':
+                    # 절대값 기준 (CPU, Latency 등)
+                    if 'high_threshold' in config:
+                        outliers = series[series > config['high_threshold']]
+                    if 'low_threshold' in config:
+                        low_outliers = series[series < config['low_threshold']]
+                        outliers = pd.concat([outliers, low_outliers])
+                        
+                elif config['method'] == 'spike':
+                    # 급격한 변화 탐지 (Connections, IOPS, Network 등)
+                    median = series.median()
+                    mad = (series - median).abs().median()
+                    threshold = median + config.get('spike_factor', 3.0) * mad
+                    outliers = series[series > threshold]
+                    
+                elif config['method'] == 'percentage':
+                    # 백분율 기준 (Memory, Cache Hit Ratio 등)
+                    if 'low_threshold' in config:
+                        outliers = series[series < config['low_threshold']]
+                        
+                else:
+                    # IQR 방식 (기본값)
+                    Q1 = series.quantile(0.25)
+                    Q3 = series.quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    outliers = series[(series < lower_bound) | (series > upper_bound)]
 
-                outliers = series[(series < lower_bound) | (series > upper_bound)]
+                # 물리적 제약 적용
+                if config.get('min') is not None:
+                    outliers = outliers[outliers >= config['min']]
+                if config.get('max') is not None:
+                    outliers = outliers[outliers <= config['max']]
 
                 if not outliers.empty:
-                    result += f"⚠️ {column} 메트릭의 아웃라이어 ({len(outliers)}개):\n"
-                    result += f"   정상 범위: {lower_bound:.2f} ~ {upper_bound:.2f}\n"
+                    severity = "🔥" if len(outliers) > len(series) * 0.1 else "⚠️"
+                    result += f"{severity} {column} 이상 탐지 ({len(outliers)}개):\n"
+                    
+                    # 심각도 판정
+                    if column == 'CPUUtilization' and outliers.max() > 90:
+                        critical_issues.append(f"CPU 사용률 위험 수준: {outliers.max():.1f}%")
+                    elif column in ['ReadLatency', 'WriteLatency'] and outliers.max() > 0.1:
+                        critical_issues.append(f"{column} 지연시간 급증: {outliers.max():.3f}초")
+                    elif column in ['DBLoad', 'DBLoadCPU', 'DBLoadNonCPU']:
+                        # 동적 임계값 기반 판정
+                        instance_class = getattr(self, 'current_instance_class', 'r5.large')
+                        dynamic_threshold = self.get_dynamic_dbload_threshold(instance_class)
+                        if outliers.max() > dynamic_threshold * 1.5:  # 임계값의 150% 초과 시 심각
+                            critical_issues.append(f"{column} 부하 과다 (인스턴스: {instance_class}): {outliers.max():.1f} (임계값: {dynamic_threshold:.1f})")
 
-                    # 최대 5개까지만 표시
-                    for i, (timestamp, value) in enumerate(outliers.items()):
-                        if i >= 5:
-                            result += f"   ... 및 {len(outliers) - 5}개 더\n"
-                            break
+                    # 상위 3개 이상값만 표시
+                    top_outliers = outliers.nlargest(3)
+                    for timestamp, value in top_outliers.items():
                         result += f"   • {timestamp}: {value:.2f}\n"
+                    
+                    if len(outliers) > 3:
+                        result += f"   ... 및 {len(outliers) - 3}개 더\n"
                     result += "\n"
 
-                    outlier_summary.append(
-                        {
-                            "metric": column,
-                            "count": len(outliers),
-                            "percentage": (len(outliers) / len(series)) * 100,
-                        }
-                    )
+                    outlier_summary.append({
+                        "metric": column,
+                        "count": len(outliers),
+                        "max_value": outliers.max(),
+                        "severity": "Critical" if len(outliers) > len(series) * 0.1 else "Warning"
+                    })
                 else:
-                    result += f"✅ {column}: 아웃라이어 없음\n"
+                    result += f"✅ {column}: 정상 범위\n"
 
-            # 요약 정보
+            # 심각한 문제 요약
+            if critical_issues:
+                result += "\n🚨 즉시 조치 필요:\n"
+                for issue in critical_issues:
+                    result += f"• {issue}\n"
+
+            # 전체 요약
             if outlier_summary:
-                result += "\n📋 아웃라이어 요약:\n"
-                for summary in outlier_summary:
-                    result += f"• {summary['metric']}: {summary['count']}개 ({summary['percentage']:.1f}%)\n"
+                result += "\n📊 탐지 요약:\n"
+                critical_count = sum(1 for s in outlier_summary if s['severity'] == 'Critical')
+                warning_count = len(outlier_summary) - critical_count
+                result += f"• 심각: {critical_count}개 메트릭\n"
+                result += f"• 경고: {warning_count}개 메트릭\n"
+            else:
+                result += "\n✅ 모든 메트릭이 정상 범위 내에 있습니다.\n"
+
+            # 임계값 정보 HTML 생성
+            threshold_html = self.generate_threshold_html(metric_thresholds)
+            
+            # HTML 보고서 생성 (선택적)
+            debug_log(f"skip_html_report: {skip_html_report}")
+            if not skip_html_report:
+                debug_log("HTML 보고서 생성 중...")
+                html_report_path = OUTPUT_DIR / f"outlier_analysis_{csv_file.replace('.csv', '')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                self.save_outlier_html_report(result, threshold_html, html_report_path)
+                result += f"\n📄 상세 보고서: {self.format_file_link(str(html_report_path), '아웃라이어 분석 보고서 열기')}\n"
+                result += "💡 보고서에서 '임계값 설정' 버튼을 클릭하여 상세 설정을 확인하세요.\n"
+            else:
+                debug_log("HTML 보고서 생성 건너뜀")
 
             return result
 
         except Exception as e:
             return f"아웃라이어 탐지 중 오류 발생: {str(e)}"
+
+    def generate_threshold_html(self, thresholds: dict) -> str:
+        """임계값 설정을 HTML 테이블로 생성"""
+        html = """
+        <div id="thresholdModal" class="modal">
+            <div class="modal-content">
+                <span class="close">&times;</span>
+                <h2>📊 메트릭 임계값 설정</h2>
+                <table class="threshold-table">
+                    <thead>
+                        <tr>
+                            <th>메트릭</th>
+                            <th>탐지 방식</th>
+                            <th>임계값</th>
+                            <th>설명</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        
+        for metric, config in thresholds.items():
+            method = config.get('method', 'iqr')
+            threshold_info = []
+            
+            if method == 'absolute':
+                if config.get('high_threshold'):
+                    threshold_info.append(f"상한: {config['high_threshold']}")
+                if config.get('low_threshold'):
+                    threshold_info.append(f"하한: {config['low_threshold']}")
+            elif method == 'spike':
+                threshold_info.append(f"급증 배수: {config.get('spike_factor', 3.0)}")
+            elif method == 'percentage':
+                if config.get('low_threshold'):
+                    threshold_info.append(f"최소: {config['low_threshold']}%")
+            
+            threshold_str = ", ".join(threshold_info) if threshold_info else "IQR 방식"
+            description = config.get('description', f"{metric} 메트릭")
+            
+            html += f"""
+                        <tr>
+                            <td>{metric}</td>
+                            <td>{method}</td>
+                            <td>{threshold_str}</td>
+                            <td>{description}</td>
+                        </tr>
+            """
+        
+        html += """
+                    </tbody>
+                </table>
+                <p><strong>📁 설정 파일:</strong> input/metric_thresholds_*.txt</p>
+                <p><strong>💡 수정 방법:</strong> input 폴더의 최신 임계값 파일을 편집하세요.</p>
+            </div>
+        </div>
+        """
+        return html
+
+    def save_outlier_html_report(self, result: str, threshold_html: str, report_path: Path):
+        """아웃라이어 분석 HTML 보고서 저장"""
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>아웃라이어 분석 보고서</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .header {{ text-align: center; margin-bottom: 30px; }}
+        .btn {{ background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px; }}
+        .btn:hover {{ background-color: #0056b3; }}
+        .result-content {{ white-space: pre-wrap; font-family: monospace; background: #f8f9fa; padding: 20px; border-radius: 5px; }}
+        .modal {{ display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.4); }}
+        .modal-content {{ background-color: #fefefe; margin: 5% auto; padding: 20px; border: none; border-radius: 10px; width: 80%; max-width: 800px; }}
+        .close {{ color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }}
+        .close:hover {{ color: black; }}
+        .threshold-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+        .threshold-table th, .threshold-table td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+        .threshold-table th {{ background-color: #f2f2f2; font-weight: bold; }}
+        .threshold-table tr:nth-child(even) {{ background-color: #f9f9f9; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 아웃라이어 분석 보고서</h1>
+            <p>생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <button class="btn" onclick="document.getElementById('thresholdModal').style.display='block'">
+                📊 임계값 설정 보기
+            </button>
+        </div>
+        
+        <div class="result-content">{result}</div>
+        
+        {threshold_html}
+    </div>
+
+    <script>
+        // 모달 창 제어
+        var modal = document.getElementById('thresholdModal');
+        var span = document.getElementsByClassName('close')[0];
+        
+        span.onclick = function() {{
+            modal.style.display = 'none';
+        }}
+        
+        window.onclick = function(event) {{
+            if (event.target == modal) {{
+                modal.style.display = 'none';
+            }}
+        }}
+    </script>
+</body>
+</html>
+        """
+        
+        try:
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+        except Exception as e:
+            debug_log(f"HTML 보고서 저장 실패: {e}")
 
     async def perform_regression_analysis(
         self,
@@ -7857,46 +8763,7 @@ Knowledge Base 성능 최적화 가이드:
             else:
                 result += f"• 모델 설명력: {r2*100:.1f}% (낮은 예측 정확도)\n"
 
-            # 그래프 그리기
-            plt.figure(figsize=(12, 8))
-
-            # 산점도
-            plt.subplot(2, 1, 1)
-            plt.scatter(X_test, y_test, color="blue", alpha=0.6, label="실제 데이터")
-
-            # 예측 곡선을 위한 정렬된 데이터
-            X_plot = np.linspace(X_test.min(), X_test.max(), 100).reshape(-1, 1)
-            X_plot_poly = poly_features.transform(X_plot)
-            y_plot_pred = model.predict(X_plot_poly)
-
-            plt.plot(X_plot, y_plot_pred, color="red", linewidth=2, label="예측 모델")
-            plt.title(f"{predictor_metric} vs {target_metric} 회귀 분석")
-            plt.xlabel(predictor_metric)
-            plt.ylabel(target_metric)
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-
-            # 잔차 플롯
-            plt.subplot(2, 1, 2)
-            residuals = y_test - y_pred
-            plt.scatter(y_pred, residuals, color="green", alpha=0.6)
-            plt.axhline(y=0, color="red", linestyle="--")
-            plt.title("잔차 플롯 (Residual Plot)")
-            plt.xlabel("예측값")
-            plt.ylabel("잔차")
-            plt.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            graph_file = (
-                OUTPUT_DIR
-                / f"regression_analysis_{predictor_metric}_{target_metric}_{timestamp}.png"
-            )
-            plt.savefig(graph_file, dpi=300, bbox_inches="tight")
-            plt.close()
-
-            result += f"📈 회귀 분석 그래프가 저장되었습니다: {graph_file}"
+            # 그래프 생성 제거됨 - 텍스트 결과만 반환
             return result
 
         except Exception as e:
@@ -8066,109 +8933,516 @@ Knowledge Base 성능 최적화 가이드:
 
         return result
 
-    async def collect_slow_queries(
-        self, database_secret: str, db_instance_identifier: str = None
-    ) -> str:
-        """느린 쿼리 수집 및 SQL 파일 생성"""
+    async def debug_cloudwatch_collection(self, database_secret: str, start_time: str, end_time: str) -> str:
+        """CloudWatch 수집 디버그 함수"""
         try:
-            # 기존 연결이 있으면 정리
+            # 시간 변환 (KST -> UTC)
+            start_dt = self.convert_kst_to_utc(start_time)
+            end_dt = self.convert_kst_to_utc(end_time)
+            
+            # 시크릿에서 DB 정보 가져오기
+            secrets_client = boto3.client('secretsmanager', region_name='ap-northeast-2')
+            secret_response = secrets_client.get_secret_value(SecretId=database_secret)
+            secret_data = json.loads(secret_response['SecretString'])
+            
+            # DB 클러스터 식별자 추출
+            db_host = secret_data.get('host', '')
+            if '.cluster-' in db_host:
+                cluster_identifier = db_host.split('.cluster-')[0]
+            else:
+                return "❌ Aurora 클러스터를 찾을 수 없습니다"
+            
+            # CloudWatch 수집 시도
+            logs_client = boto3.client('logs', region_name='ap-northeast-2')
+            log_group_name = f"/aws/rds/cluster/{cluster_identifier}/slowquery"
+            
+            start_time_ms = int(start_dt.timestamp() * 1000)
+            end_time_ms = int(end_dt.timestamp() * 1000)
+            
+            print(f"DEBUG: 클러스터 ID: {cluster_identifier}")
+            print(f"DEBUG: 로그 그룹: {log_group_name}")
+            print(f"DEBUG: 시간 범위: {start_dt} ~ {end_dt} (UTC)")
+            print(f"DEBUG: 타임스탬프: {start_time_ms} ~ {end_time_ms}")
+            
+            response = logs_client.filter_log_events(
+                logGroupName=log_group_name,
+                startTime=start_time_ms,
+                endTime=end_time_ms
+            )
+            
+            events_count = len(response.get('events', []))
+            print(f"DEBUG: 검색된 이벤트 수: {events_count}")
+            
+            if events_count > 0:
+                # 첫 번째 이벤트 확인
+                first_event = response['events'][0]
+                print(f"DEBUG: 첫 번째 이벤트 타임스탬프: {first_event['timestamp']}")
+                print(f"DEBUG: 첫 번째 이벤트 메시지 미리보기: {first_event['message'][:100]}...")
+                
+                # 파싱 테스트
+                message = first_event['message'].replace('\\n', '\n')
+                print(f"DEBUG: Query_time 패턴 존재? {'# Query_time: ' in message}")
+                
+                if '# Query_time: ' in message:
+                    lines = message.split('\n')
+                    print(f"DEBUG: 분할된 라인 수: {len(lines)}")
+                    for i, line in enumerate(lines[:5]):  # 처음 5줄만
+                        print(f"DEBUG: Line {i}: {repr(line)}")
+            
+            return f"✅ 디버그 완료: {events_count}개 이벤트 발견"
+            
+        except Exception as e:
+            import traceback
+            return f"❌ 디버그 실패: {str(e)}\n{traceback.format_exc()}"
+
+    async def collect_slow_queries(
+        self, database_secret: str, start_time: str = None, end_time: str = None
+    ) -> str:
+        """슬로우 쿼리 수집 (CloudWatch → 로컬파일 → Performance Schema 순서)"""
+        try:
+            # 시간대 처리 (KST -> UTC)
+            if start_time and end_time:
+                start_dt = self.convert_kst_to_utc(start_time)
+                end_dt = self.convert_kst_to_utc(end_time)
+            else:
+                # 기본값: 24시간 전부터 현재까지 (UTC 기준)
+                end_dt = datetime.utcnow()
+                start_dt = end_dt - timedelta(hours=24)
+
+            # 시크릿에서 DB 정보 가져오기
+            secrets_client = boto3.client('secretsmanager', region_name=self.default_region)
+            secret_response = secrets_client.get_secret_value(SecretId=database_secret)
+            secret_data = json.loads(secret_response['SecretString'])
+            
+            # DB 클러스터 식별자 추출
+            db_host = secret_data.get('host', '')
+            if '.cluster-' in db_host:
+                cluster_identifier = db_host.split('.cluster-')[0]
+            else:
+                return "❌ Aurora 클러스터를 찾을 수 없습니다"
+
+            # 1단계: CloudWatch Logs에서 슬로우 쿼리 수집 시도
+            cloudwatch_result = await self._collect_from_cloudwatch(
+                cluster_identifier, start_dt, end_dt
+            )
+            
+            if cloudwatch_result['success']:
+                return cloudwatch_result['message']
+            
+            # 2단계: 로컬 파일에서 수집 시도
+            local_file_result = await self._collect_from_local_file(
+                database_secret, start_dt, end_dt
+            )
+            
+            if local_file_result['success']:
+                return local_file_result['message']
+            
+            # 3단계: Performance Schema에서 수집 시도
+            performance_result = await self._collect_from_performance_schema(
+                database_secret, start_dt, end_dt
+            )
+            
+            if performance_result['success']:
+                return performance_result['message']
+            
+            # 4단계: Log exports 설정 제안
+            return await self._suggest_log_exports_setup(cluster_identifier, cloudwatch_result['message'])
+            
+        except ValueError as ve:
+            return f"❌ {str(ve)}"
+        except Exception as e:
+            import traceback
+            return f"❌ 슬로우 쿼리 수집 실패: {str(e)}\n{traceback.format_exc()}"
+
+    async def _collect_from_local_file(self, database_secret: str, start_dt: datetime, end_dt: datetime) -> dict:
+        """로컬 슬로우 쿼리 파일에서 수집"""
+        try:
+            # 기존 연결 정리
             if self.shared_connection or self.shared_cursor:
                 self.cleanup_shared_connection()
-            
-            # 특정 인스턴스로 새로 연결
-            if not self.setup_shared_connection(
-                database_secret, None, True, db_instance_identifier
-            ):
-                return "❌ 데이터베이스 연결 실패"
+
+            # 데이터베이스 연결
+            if not self.setup_shared_connection(database_secret, None, True):
+                return {'success': False, 'message': "데이터베이스 연결 실패"}
 
             cursor = self.shared_cursor
-
-            # 현재 날짜와 인스턴스 ID로 파일명 생성
-            current_date = datetime.now().strftime("%Y%m%d")
-            instance_suffix = f"_{db_instance_identifier}" if db_instance_identifier else ""
-            filename = f"slow_queries{instance_suffix}_{current_date}.sql"
-            file_path = SQL_DIR / filename
-
-            collected_queries = set()  # 중복 제거용
-
-            # 1. performance_schema에서 느린 쿼리 수집 시도
+            
+            # 슬로우 쿼리 로그 파일 경로 확인
+            cursor.execute("SHOW VARIABLES LIKE 'slow_query_log_file'")
+            result = cursor.fetchone()
+            if not result:
+                return {'success': False, 'message': "슬로우 쿼리 로그 파일 경로를 찾을 수 없음"}
+            
+            log_file_path = result[1]
+            
+            # 파일 내용 읽기 시도 (LOAD_FILE 함수 사용)
             try:
-                cursor.execute(
-                    """
-                    SELECT QUERY_SAMPLE_TEXT 
-                    FROM performance_schema.events_statements_summary_by_digest 
-                    WHERE DIGEST_TEXT IS NOT NULL 
-                        AND AVG_TIMER_WAIT >= 1000000000000
-                        AND DIGEST_TEXT NOT LIKE '%performance_schema%'
-                        AND DIGEST_TEXT NOT LIKE '%information_schema%'
-                        AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
-                    ORDER BY AVG_TIMER_WAIT DESC 
-                    LIMIT 10
-                """
-                )
-
-                for (query,) in cursor.fetchall():
-                    if query and query.strip():
-                        query_clean = query.strip()
-                        # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith("EXPLAIN"):
-                            # performance_schema, information_schema 관련 쿼리 제외
-                            if (
-                                "performance_schema" not in query_clean.lower()
-                                and "information_schema" not in query_clean.lower()
-                            ):
-                                collected_queries.add(query_clean)
-
+                cursor.execute(f"SELECT LOAD_FILE('{log_file_path}')")
+                file_content = cursor.fetchone()
+                
+                if not file_content or not file_content[0]:
+                    return {'success': False, 'message': f"슬로우 쿼리 로그 파일을 읽을 수 없음: {log_file_path}"}
+                
+                content = file_content[0].decode('utf-8') if isinstance(file_content[0], bytes) else str(file_content[0])
+                
+                # 시간 범위 필터링을 위한 로그 파싱
+                slow_queries = self._parse_slow_query_log(content, start_dt, end_dt)
+                
+                if slow_queries:
+                    # 파일 생성
+                    current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"slow_queries_local_file_{current_date}.sql"
+                    file_path = SQL_DIR / filename
+                    
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(f"-- 로컬 슬로우 쿼리 파일 수집 결과\n")
+                        f.write(f"-- 파일 경로: {log_file_path}\n")
+                        f.write(f"-- 수집 기간: {self.convert_utc(start_dt)} ~ {self.convert_utc(end_dt)} (KST)\n")
+                        f.write(f"-- 총 {len(slow_queries)}개의 쿼리\n\n")
+                        
+                        for i, query in enumerate(slow_queries, 1):
+                            f.write(f"-- 슬로우 쿼리 #{i}\n")
+                            if 'time' in query:
+                                f.write(f"-- {query['time']}\n")
+                            if 'query_time' in query:
+                                f.write(f"-- {query['query_time']}\n")
+                            if 'user_host' in query:
+                                f.write(f"-- {query['user_host']}\n")
+                            f.write(f"{query['sql']};\n\n")
+                    
+                    return {
+                        'success': True,
+                        'message': f"✅ 로컬 파일에서 슬로우 쿼리 {len(slow_queries)}개 수집 완료: {filename}\n파일 경로: {log_file_path}"
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': f"로컬 파일에서 해당 시간 범위의 슬로우 쿼리를 찾을 수 없음"
+                    }
+                    
             except Exception as e:
-                print(f"performance_schema 접근 실패: {e}")
-
-            # 2. information_schema.PROCESSLIST에서 현재 실행 중인 느린 쿼리 수집
-            try:
-                cursor.execute(
-                    """
-                    SELECT INFO 
-                    FROM information_schema.PROCESSLIST 
-                    WHERE COMMAND = 'Query' 
-                        AND TIME >= 1
-                        AND INFO IS NOT NULL
-                        AND INFO NOT LIKE '%PROCESSLIST%'
-                        AND INFO NOT LIKE 'EXPLAIN%'
-                    ORDER BY TIME DESC
-                    LIMIT 10
-                """
-                )
-
-                for (query,) in cursor.fetchall():
-                    if query and query.strip():
-                        query_clean = query.strip()
-                        # EXPLAIN으로 시작하는 쿼리 제외
-                        if not query_clean.upper().startswith("EXPLAIN"):
-                            # performance_schema, information_schema 관련 쿼리 제외
-                            if (
-                                "performance_schema" not in query_clean.lower()
-                                and "information_schema" not in query_clean.lower()
-                            ):
-                                collected_queries.add(query_clean)
-
-            except Exception as e:
-                print(f"PROCESSLIST 접근 실패: {e}")
-
-            # 쿼리가 있을 때만 파일 생성
-            if collected_queries:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(f"-- 느린 쿼리 모음 (수집일시: {datetime.now()})\n")
-                    f.write(f"-- 총 {len(collected_queries)}개의 쿼리\n\n")
-
-                    for i, query in enumerate(collected_queries, 1):
-                        f.write(f"-- 느린 쿼리 #{i}\n")
-                        f.write(f"{query};\n\n")
-
-                return f"✅ 느린 쿼리 {len(collected_queries)}개 수집 완료: {filename}"
-            else:
-                return f"✅ 느린 쿼리가 발견되지 않았습니다 (파일 생성하지 않음)"
-
+                return {
+                    'success': False,
+                    'message': f"로컬 파일 읽기 실패: {str(e)}"
+                }
+                
         except Exception as e:
-            return f"❌ 느린 쿼리 수집 실패: {str(e)}"
+            return {
+                'success': False,
+                'message': f"로컬 파일 수집 실패: {str(e)}"
+            }
+
+    def _parse_slow_query_log(self, content: str, start_dt: datetime, end_dt: datetime) -> list:
+        """슬로우 쿼리 로그 내용 파싱"""
+        slow_queries = []
+        lines = content.split('\n')
+        current_query = {}
+        sql_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            if line.startswith('# Time:'):
+                # 이전 쿼리 저장
+                if current_query and sql_lines:
+                    current_query['sql'] = ' '.join(sql_lines)
+                    
+                    # 시간 범위 체크
+                    if self._is_within_time_range(current_query.get('time', ''), start_dt, end_dt):
+                        slow_queries.append(current_query.copy())
+                
+                # 새 쿼리 시작
+                current_query = {'time': line}
+                sql_lines = []
+                
+            elif line.startswith('# Query_time:'):
+                current_query['query_time'] = line
+            elif line.startswith('# User@Host:'):
+                current_query['user_host'] = line
+            elif not line.startswith('#') and line and not line.startswith('SET timestamp'):
+                if not line.startswith('use '):
+                    sql_lines.append(line)
+        
+        # 마지막 쿼리 처리
+        if current_query and sql_lines:
+            current_query['sql'] = ' '.join(sql_lines)
+            if self._is_within_time_range(current_query.get('time', ''), start_dt, end_dt):
+                slow_queries.append(current_query)
+        
+        return slow_queries
+
+    def _is_within_time_range(self, time_str: str, start_dt: datetime, end_dt: datetime) -> bool:
+        """시간 문자열이 범위 내에 있는지 확인"""
+        try:
+            # # Time: 2025-09-05T14:30:45.123456Z 형식 파싱
+            if 'Time:' in time_str:
+                time_part = time_str.split('Time:')[1].strip()
+                # Z를 제거하고 마이크로초 부분 처리
+                if 'Z' in time_part:
+                    time_part = time_part.replace('Z', '')
+                if '.' in time_part:
+                    time_part = time_part.split('.')[0]
+                
+                query_time = datetime.strptime(time_part, '%Y-%m-%dT%H:%M:%S')
+                return start_dt <= query_time <= end_dt
+        except:
+            pass
+        return True  # 파싱 실패 시 포함
+
+    async def _collect_from_cloudwatch(self, cluster_identifier: str, start_dt: datetime, end_dt: datetime) -> dict:
+        """CloudWatch Logs에서 인스턴스별로 슬로우 쿼리 수집"""
+        try:
+            logs_client = boto3.client('logs', region_name=self.default_region)
+            log_group_name = f"/aws/rds/cluster/{cluster_identifier}/slowquery"
+            
+            start_time_ms = int(start_dt.timestamp() * 1000)
+            end_time_ms = int(end_dt.timestamp() * 1000)
+            
+            # 먼저 로그 스트림 목록 조회
+            streams_response = logs_client.describe_log_streams(
+                logGroupName=log_group_name,
+                orderBy='LastEventTime',
+                descending=True
+            )
+            
+            log_streams = streams_response.get('logStreams', [])
+            if not log_streams:
+                return {
+                    'success': False,
+                    'message': f"로그 스트림을 찾을 수 없음: {log_group_name}"
+                }
+            
+            instance_files = []
+            total_queries = 0
+            
+            # 각 로그 스트림(인스턴스)별로 처리
+            for stream in log_streams:
+                stream_name = stream['logStreamName']
+                
+                # 인스턴스 ID 추출 (예: cluster-instance-1)
+                instance_id = stream_name.split('/')[-1] if '/' in stream_name else stream_name
+                
+                try:
+                    # 인스턴스별 이벤트 조회
+                    response = logs_client.filter_log_events(
+                        logGroupName=log_group_name,
+                        logStreamNames=[stream_name],
+                        startTime=start_time_ms,
+                        endTime=end_time_ms
+                    )
+                    
+                    events = response.get('events', [])
+                    if not events:
+                        continue
+                    
+                    # 슬로우 쿼리 파싱
+                    slow_queries = []
+                    for event in events:
+                        message = event['message'].replace('\\n', '\n')
+                        
+                        if '# Query_time: ' in message:
+                            lines = message.split('\n')
+                            query_info = {'instance_id': instance_id}
+                            sql_lines = []
+                            
+                            for line in lines:
+                                if line.startswith('# Query_time:'):
+                                    query_info['query_time'] = line
+                                elif line.startswith('# User@Host:'):
+                                    query_info['user_host'] = line
+                                elif line.startswith('# Time:'):
+                                    query_info['time'] = line
+                                elif not line.startswith('#') and line.strip() and not line.startswith('SET timestamp'):
+                                    if not line.startswith('use '):
+                                        sql_lines.append(line.strip())
+                            
+                            if sql_lines:
+                                query_info['sql'] = ' '.join(sql_lines)
+                                slow_queries.append(query_info)
+                    
+                    if slow_queries:
+                        # 인스턴스별 파일 생성
+                        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"slow_queries_{instance_id}_{current_date}.sql"
+                        file_path = SQL_DIR / filename
+                        
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(f"-- CloudWatch Logs 슬로우 쿼리 수집 결과 (인스턴스: {instance_id})\n")
+                            f.write(f"-- 수집 기간: {self.convert_utc(start_dt)} ~ {self.convert_utc(end_dt)} (Local)\n")
+                            f.write(f"-- 로그 스트림: {stream_name}\n")
+                            f.write(f"-- 총 {len(slow_queries)}개의 쿼리\n\n")
+                            
+                            for i, query in enumerate(slow_queries, 1):
+                                f.write(f"-- 슬로우 쿼리 #{i} (인스턴스: {instance_id})\n")
+                                if 'time' in query:
+                                    f.write(f"-- {query['time']}\n")
+                                if 'query_time' in query:
+                                    f.write(f"-- {query['query_time']}\n")
+                                if 'user_host' in query:
+                                    f.write(f"-- {query['user_host']}\n")
+                                f.write(f"{query['sql']};\n\n")
+                        
+                        instance_files.append(f"{instance_id}: {self.format_file_link(str(file_path), filename)} ({len(slow_queries)}개)")
+                        total_queries += len(slow_queries)
+                
+                except Exception as e:
+                    print(f"인스턴스 {instance_id} 처리 중 오류: {e}")
+                    continue
+            
+            if instance_files:
+                return {
+                    'success': True,
+                    'message': f"✅ CloudWatch에서 인스턴스별 슬로우 쿼리 수집 완료 (총 {total_queries}개)\n" + 
+                              "\n".join([f"• {file_info}" for file_info in instance_files])
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': f"CloudWatch Logs에서 슬로우 쿼리를 찾을 수 없음 (스트림 수: {len(log_streams)})"
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f"CloudWatch Logs 조회 실패: {str(e)}"
+            }
+
+    async def _collect_from_performance_schema(self, database_secret: str, start_dt: datetime, end_dt: datetime) -> dict:
+        """Performance Schema에서 슬로우 쿼리 수집"""
+        try:
+            # 기존 연결 정리
+            if self.shared_connection or self.shared_cursor:
+                self.cleanup_shared_connection()
+
+            # 데이터베이스 연결
+            if not self.setup_shared_connection(database_secret, None, True):
+                return {'success': False, 'message': "데이터베이스 연결 실패"}
+
+            cursor = self.shared_cursor
+            
+            # Performance Schema에서 느린 쿼리 조회
+            query = """
+            SELECT 
+                DIGEST_TEXT as sql_text,
+                COUNT_STAR as exec_count,
+                AVG_TIMER_WAIT/1000000000000 as avg_time_sec,
+                MAX_TIMER_WAIT/1000000000000 as max_time_sec,
+                SUM_TIMER_WAIT/1000000000000 as total_time_sec,
+                FIRST_SEEN,
+                LAST_SEEN
+            FROM performance_schema.events_statements_summary_by_digest 
+            WHERE AVG_TIMER_WAIT/1000000000000 > 1.0
+            AND LAST_SEEN >= %s
+            ORDER BY AVG_TIMER_WAIT DESC 
+            LIMIT 50
+            """
+            
+            cursor.execute(query, (start_dt,))
+            results = cursor.fetchall()
+            
+            if results:
+                # 파일 생성
+                current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"slow_queries_performance_schema_{current_date}.sql"
+                file_path = SQL_DIR / filename
+                
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(f"-- Performance Schema 슬로우 쿼리 수집 결과\n")
+                    f.write(f"-- 수집 기간: {self.convert_utc(start_dt)} ~ {self.convert_utc(end_dt)} (Local)\n")
+                    f.write(f"-- 총 {len(results)}개의 쿼리\n\n")
+                    
+                    for i, row in enumerate(results, 1):
+                        sql_text, exec_count, avg_time, max_time, total_time, first_seen, last_seen = row
+                        f.write(f"-- 슬로우 쿼리 #{i}\n")
+                        f.write(f"-- 실행횟수: {exec_count}, 평균시간: {avg_time:.3f}초, 최대시간: {max_time:.3f}초\n")
+                        f.write(f"-- 총 시간: {total_time:.3f}초, 마지막 실행: {last_seen}\n")
+                        f.write(f"{sql_text};\n\n")
+                
+                return {
+                    'success': True,
+                    'message': f"✅ Performance Schema에서 슬로우 쿼리 {len(results)}개 수집 완료: {filename}\n검색 기간: {start_dt} ~ {end_dt} (UTC)"
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': f"Performance Schema에서도 슬로우 쿼리를 찾을 수 없음"
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f"Performance Schema 조회 실패: {str(e)}"
+            }
+
+    async def _suggest_log_exports_setup(self, cluster_identifier: str, cloudwatch_error: str) -> str:
+        """Log exports 설정 제안 및 자동 설정"""
+        try:
+            # RDS 클라이언트로 현재 설정 확인
+            rds_client = boto3.client('rds', region_name='ap-northeast-2')
+            
+            try:
+                response = rds_client.describe_db_clusters(
+                    DBClusterIdentifier=cluster_identifier
+                )
+                cluster = response['DBClusters'][0]
+                enabled_logs = cluster.get('EnabledCloudwatchLogsExports', [])
+                
+                result_msg = f"🔍 **슬로우 쿼리 수집 결과**\n\n"
+                result_msg += f"❌ CloudWatch Logs: {cloudwatch_error}\n"
+                result_msg += f"❌ Performance Schema: 슬로우 쿼리 없음\n\n"
+                result_msg += f"📊 **현재 Log Exports 설정**\n"
+                result_msg += f"클러스터: {cluster_identifier}\n"
+                result_msg += f"활성화된 로그: {enabled_logs if enabled_logs else '없음'}\n\n"
+                
+                if 'slowquery' not in enabled_logs:
+                    result_msg += f"💡 **해결 방안**\n"
+                    result_msg += f"Aurora 클러스터에서 SlowQuery 로그를 CloudWatch로 전송하도록 설정이 필요합니다.\n\n"
+                    result_msg += f"**자동 설정을 진행하시겠습니까?**\n"
+                    result_msg += f"다음 명령이 실행됩니다:\n"
+                    result_msg += f"```\n"
+                    result_msg += f"aws rds modify-db-cluster \\\n"
+                    result_msg += f"  --db-cluster-identifier {cluster_identifier} \\\n"
+                    result_msg += f"  --cloudwatch-logs-configuration 'EnableLogTypes=slowquery'\n"
+                    result_msg += f"```\n\n"
+                    result_msg += f"설정 후 약 5-10분 후부터 CloudWatch Logs에서 슬로우 쿼리를 확인할 수 있습니다.\n\n"
+                    result_msg += f"**설정하시겠습니까? (y/n)**"
+                    
+                    # 사용자 입력 대기는 MCP에서 지원하지 않으므로, 별도 함수로 분리
+                    return result_msg
+                else:
+                    result_msg += f"✅ SlowQuery 로그 전송이 이미 활성화되어 있습니다.\n"
+                    result_msg += f"로그가 나타나지 않는 이유:\n"
+                    result_msg += f"1. 실제로 1초 이상 실행되는 쿼리가 없음\n"
+                    result_msg += f"2. 로그 전송에 지연이 있음 (최대 10분)\n"
+                    result_msg += f"3. 로그 보존 정책으로 인한 삭제\n"
+                    return result_msg
+                    
+            except Exception as e:
+                return f"❌ 클러스터 정보 조회 실패: {str(e)}"
+                
+        except Exception as e:
+            return f"❌ Log exports 설정 확인 실패: {str(e)}"
+
+    async def enable_slow_query_log_exports(self, cluster_identifier: str) -> str:
+        """Aurora 클러스터의 SlowQuery 로그 CloudWatch 전송 활성화"""
+        try:
+            rds_client = boto3.client('rds', region_name='ap-northeast-2')
+            
+            response = rds_client.modify_db_cluster(
+                DBClusterIdentifier=cluster_identifier,
+                CloudwatchLogsConfiguration={
+                    'EnableLogTypes': ['slowquery']
+                },
+                ApplyImmediately=True
+            )
+            
+            return f"✅ SlowQuery 로그 CloudWatch 전송이 활성화되었습니다.\n" \
+                   f"클러스터: {cluster_identifier}\n" \
+                   f"상태: {response['DBCluster']['Status']}\n" \
+                   f"약 5-10분 후부터 CloudWatch Logs에서 슬로우 쿼리를 확인할 수 있습니다."
+                   
+        except Exception as e:
+            return f"❌ SlowQuery 로그 활성화 실패: {str(e)}"
 
     async def collect_memory_intensive_queries(
         self, database_secret: str, db_instance_identifier: str = None
@@ -8178,7 +9452,7 @@ Knowledge Base 성능 최적화 가이드:
             # 기존 연결이 있으면 정리
             if self.shared_connection or self.shared_cursor:
                 self.cleanup_shared_connection()
-            
+
             # 특정 인스턴스로 새로 연결
             if not self.setup_shared_connection(
                 database_secret, None, True, db_instance_identifier
@@ -8189,7 +9463,9 @@ Knowledge Base 성능 최적화 가이드:
 
             # 현재 날짜와 인스턴스 ID로 파일명 생성
             current_date = datetime.now().strftime("%Y%m%d")
-            instance_suffix = f"_{db_instance_identifier}" if db_instance_identifier else ""
+            instance_suffix = (
+                f"_{db_instance_identifier}" if db_instance_identifier else ""
+            )
             filename = f"memory_intensive_queries{instance_suffix}_{current_date}.sql"
             file_path = SQL_DIR / filename
 
@@ -8255,7 +9531,7 @@ Knowledge Base 성능 최적화 가이드:
             # 기존 연결이 있으면 정리
             if self.shared_connection or self.shared_cursor:
                 self.cleanup_shared_connection()
-            
+
             # 특정 인스턴스로 새로 연결
             if not self.setup_shared_connection(
                 database_secret, None, True, db_instance_identifier
@@ -8266,7 +9542,9 @@ Knowledge Base 성능 최적화 가이드:
 
             # 현재 날짜와 인스턴스 ID로 파일명 생성
             current_date = datetime.now().strftime("%Y%m%d")
-            instance_suffix = f"_{db_instance_identifier}" if db_instance_identifier else ""
+            instance_suffix = (
+                f"_{db_instance_identifier}" if db_instance_identifier else ""
+            )
             filename = f"cpu_intensive_queries{instance_suffix}_{current_date}.sql"
             file_path = SQL_DIR / filename
 
@@ -8344,7 +9622,7 @@ Knowledge Base 성능 최적화 가이드:
                         f.write(f"-- CPU 집약적 쿼리 #{i}\n")
                         f.write(f"{query};\n\n")
 
-                return f"✅ CPU 집약적 쿼리 {len(collected_queries)}개 수집 완료: {filename}"
+                return f"✅ CPU 집약적 쿼리 {len(collected_queries)}개 수집 완료: {self.format_file_link(str(file_path), filename)}"
             else:
                 return f"✅ CPU 집약적 쿼리가 발견되지 않았습니다 (파일 생성하지 않음)"
 
@@ -8359,7 +9637,7 @@ Knowledge Base 성능 최적화 가이드:
             # 기존 연결이 있으면 정리
             if self.shared_connection or self.shared_cursor:
                 self.cleanup_shared_connection()
-            
+
             # 특정 인스턴스로 새로 연결
             if not self.setup_shared_connection(
                 database_secret, None, True, db_instance_identifier
@@ -8370,8 +9648,12 @@ Knowledge Base 성능 최적화 가이드:
 
             # 현재 날짜와 인스턴스 ID로 파일명 생성
             current_date = datetime.now().strftime("%Y%m%d")
-            instance_suffix = f"_{db_instance_identifier}" if db_instance_identifier else ""
-            filename = f"temp_space_intensive_queries{instance_suffix}_{current_date}.sql"
+            instance_suffix = (
+                f"_{db_instance_identifier}" if db_instance_identifier else ""
+            )
+            filename = (
+                f"temp_space_intensive_queries{instance_suffix}_{current_date}.sql"
+            )
             file_path = SQL_DIR / filename
 
             collected_queries = set()  # 중복 제거용
@@ -8450,7 +9732,7 @@ Knowledge Base 성능 최적화 가이드:
                         f.write(f"-- 임시 공간 집약적 쿼리 #{i}\n")
                         f.write(f"{query};\n\n")
 
-                return f"✅ 임시 공간 집약적 쿼리 {len(collected_queries)}개 수집 완료: {filename}"
+                return f"✅ 임시 공간 집약적 쿼리 {len(collected_queries)}개 수집 완료: {self.format_file_link(str(file_path), filename)}"
             else:
                 return f"✅ 임시 공간 집약적 쿼리가 발견되지 않았습니다 (파일 생성하지 않음)"
 
@@ -8462,24 +9744,24 @@ Knowledge Base 성능 최적화 가이드:
     ) -> str:
         """Aurora MySQL 에러 로그 분석"""
         try:
-            # 시간 변환
-            start_time = datetime.strptime(start_datetime_str, "%Y-%m-%d %H:%M:%S")
-            end_time = datetime.strptime(end_datetime_str, "%Y-%m-%d %H:%M:%S")
-            
-            logger.info(f"에러 로그 분석 시작: {start_time} ~ {end_time}")
-            
+            # 시간 변환 (KST -> UTC)
+            start_time_utc = self.convert_kst_to_utc(start_datetime_str)
+            end_time_utc = self.convert_kst_to_utc(end_datetime_str)
+
+            logger.info(f"에러 로그 분석 시작: {start_time_utc} ~ {end_time_utc} (UTC)")
+
             # AWS 클라이언트 초기화
-            s3_client = boto3.client("s3", region_name="ap-northeast-2")
-            rds_client = boto3.client("rds", region_name="ap-northeast-2")
-            
+            s3_client = boto3.client("s3", region_name=self.default_region)
+            rds_client = boto3.client("rds", region_name=self.default_region)
+
             # 키워드로 시크릿 리스트 가져오기
             secret_lists = await self._get_secrets_by_keyword(keyword)
             if not secret_lists:
                 return f"❌ '{keyword}' 키워드로 찾은 시크릿이 없습니다."
-            
+
             results = []
             s3_bucket_name = "your-s3-bucket-name"  # 실제 S3 버킷명으로 변경 필요
-            
+
             for secret_name in secret_lists:
                 try:
                     # DB 인스턴스 식별자 가져오기
@@ -8487,77 +9769,101 @@ Knowledge Base 성능 최적화 가이드:
                         Filters=[{"Name": "db-cluster-id", "Values": [secret_name]}]
                     )
                     instances = [
-                        instance["DBInstanceIdentifier"] 
+                        instance["DBInstanceIdentifier"]
                         for instance in response["DBInstances"]
                     ]
-                    
+
                     for instance in instances:
                         log_content = []
-                        output_file = f"error_log_{instance}_{start_time.strftime('%Y%m%d%H%M')}_to_{end_time.strftime('%Y%m%d%H%M')}.log"
-                        
+                        output_file = f"error_log_{instance}_{start_time_utc.strftime('%Y%m%d%H%M')}_to_{end_time_utc.strftime('%Y%m%d%H%M')}.log"
+
                         # 에러 로그 파일 목록 가져오기
                         log_file_list = rds_client.describe_db_log_files(
-                            DBInstanceIdentifier=instance,
-                            FilenameContains="error"
+                            DBInstanceIdentifier=instance, FilenameContains="error"
                         )
-                        
+
                         for log_file_info in log_file_list["DescribeDBLogFiles"]:
                             log_filename = log_file_info["LogFileName"]
                             last_written = datetime.fromtimestamp(
                                 log_file_info["LastWritten"] / 1000
                             )
-                            
-                            if start_time <= last_written <= end_time:
+
+                            if start_time_utc <= last_written <= end_time_utc:
                                 # 로그 파일 내용 다운로드
                                 response = rds_client.download_db_log_file_portion(
                                     DBInstanceIdentifier=instance,
                                     LogFileName=log_filename,
-                                    Marker="0"
+                                    Marker="0",
                                 )
-                                
+
                                 log_data = response.get("LogFileData", "")
                                 lines = log_data.splitlines()
-                                
+
                                 # 중요한 에러 로그 항목 필터링
                                 error_keywords = [
-                                    "error", "warning", "critical", "failed", 
-                                    "crash", "exception", "fatal", "corruption"
+                                    "error",
+                                    "warning",
+                                    "critical",
+                                    "failed",
+                                    "crash",
+                                    "exception",
+                                    "fatal",
+                                    "corruption",
                                 ]
-                                
+
                                 for line in lines:
                                     if any(kw in line.lower() for kw in error_keywords):
                                         log_content.append(line)
-                        
+
                         # 로그 내용이 있으면 결과에 추가
                         if log_content:
                             # 적절한 크기로 분할 (최대 5000자)
                             content_chunks = self._split_log_content(log_content, 5000)
                             for i, chunk in enumerate(content_chunks):
-                                chunk_header = f"<{instance}_chunk_{i+1}>" if len(content_chunks) > 1 else f"<{instance}>"
-                                chunk_footer = f"</{instance}_chunk_{i+1}>" if len(content_chunks) > 1 else f"</{instance}>"
-                                results.append(f"{chunk_header}\n{chunk}\n{chunk_footer}")
+                                chunk_header = (
+                                    f"<{instance}_chunk_{i+1}>"
+                                    if len(content_chunks) > 1
+                                    else f"<{instance}>"
+                                )
+                                chunk_footer = (
+                                    f"</{instance}_chunk_{i+1}>"
+                                    if len(content_chunks) > 1
+                                    else f"</{instance}>"
+                                )
+                                results.append(
+                                    f"{chunk_header}\n{chunk}\n{chunk_footer}"
+                                )
                         else:
-                            results.append(f"<{instance}>\n해당 기간에 에러 로그가 없습니다.\n</{instance}>")
-                            
+                            results.append(
+                                f"<{instance}>\n해당 기간에 에러 로그가 없습니다.\n</{instance}>"
+                            )
+
                 except Exception as e:
                     logger.error(f"인스턴스 {secret_name} 처리 중 오류: {e}")
-                    results.append(f"<{secret_name}>\n로그 수집 중 오류 발생: {str(e)}\n</{secret_name}>")
-            
+                    results.append(
+                        f"<{secret_name}>\n로그 수집 중 오류 발생: {str(e)}\n</{secret_name}>"
+                    )
+
             if not results:
                 return "❌ 분석할 에러 로그를 찾을 수 없습니다."
-            
+
             # Claude를 통한 에러 로그 분석
             analysis_result = await self._analyze_error_logs_with_claude(results)
-            
+
             # 결과 저장
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = Path("output") / f"error_log_analysis_{timestamp}.html"
-            
+
             # HTML 보고서 생성
             html_report = await self._generate_error_log_html_report(
-                results, analysis_result, keyword, start_datetime_str, end_datetime_str, output_path
+                results,
+                analysis_result,
+                keyword,
+                start_datetime_str,
+                end_datetime_str,
+                output_path,
             )
-            
+
             return f"""✅ Aurora MySQL 에러 로그 분석 완료
 
 📊 분석 요약:
@@ -8571,7 +9877,7 @@ Knowledge Base 성능 최적화 가이드:
 
 📄 상세 보고서: {html_report}
 """
-            
+
         except Exception as e:
             logger.error(f"에러 로그 분석 중 오류: {e}")
             return f"❌ 에러 로그 분석 실패: {str(e)}"
@@ -8581,37 +9887,39 @@ Knowledge Base 성능 최적화 가이드:
         chunks = []
         current_chunk = []
         current_size = 0
-        
+
         for line in log_lines:
             line_size = len(line) + 1  # +1 for newline
-            
+
             if current_size + line_size > max_chars and current_chunk:
-                chunks.append('\n'.join(current_chunk))
+                chunks.append("\n".join(current_chunk))
                 current_chunk = [line]
                 current_size = line_size
             else:
                 current_chunk.append(line)
                 current_size += line_size
-        
+
         if current_chunk:
-            chunks.append('\n'.join(current_chunk))
-        
+            chunks.append("\n".join(current_chunk))
+
         return chunks
 
     async def _get_secrets_by_keyword(self, keyword: str) -> List[str]:
         """키워드로 시크릿 목록 조회"""
         try:
-            secrets_client = boto3.client("secretsmanager", region_name="ap-northeast-2")
+            secrets_client = boto3.client(
+                "secretsmanager", region_name="ap-northeast-2"
+            )
             response = secrets_client.list_secrets()
-            
+
             matching_secrets = []
             for secret in response.get("SecretList", []):
                 secret_name = secret["Name"]
                 if keyword.lower() in secret_name.lower():
                     matching_secrets.append(secret_name)
-            
+
             return matching_secrets
-            
+
         except Exception as e:
             logger.error(f"시크릿 목록 조회 중 오류: {e}")
             return []
@@ -8620,8 +9928,8 @@ Knowledge Base 성능 최적화 가이드:
         """Claude를 통한 에러 로그 분석"""
         try:
             # 로그 내용 결합
-            combined_logs = '\n'.join(log_results)
-            
+            combined_logs = "\n".join(log_results)
+
             prompt = f"""아래는 Aurora MySQL 3.5 인스턴스의 에러 로그입니다. 각 인스턴스에 대한 에러로그를 분석하고 다음 사항에 대한 요약을 제공해주세요:
 
 <instance명>과 </instance명> 사이에 있는 로그는 해당 인스턴스의 error log입니다.
@@ -8662,14 +9970,16 @@ Knowledge Base 성능 최적화 가이드:
 {combined_logs}
 """
 
-            claude_input = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4096,
-                "messages": [
-                    {"role": "user", "content": [{"type": "text", "text": prompt}]}
-                ],
-                "temperature": 0.3,
-            })
+            claude_input = json.dumps(
+                {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4096,
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                    ],
+                    "temperature": 0.3,
+                }
+            )
 
             sonnet_4_model_id = "us.anthropic.claude-sonnet-4-20250514-v1:0"
             sonnet_3_7_model_id = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
@@ -8683,36 +9993,43 @@ Knowledge Base 성능 최적화 가이드:
                 claude_response = response_body.get("content", [{}])[0].get("text", "")
                 logger.info("Claude Sonnet 4로 에러 로그 분석 완료")
                 return claude_response
-                
+
             except Exception as e:
                 logger.warning(f"Claude Sonnet 4 호출 실패, fallback 시도: {e}")
-                
+
                 # Claude 3.7 Sonnet 호출 (fallback)
                 try:
                     response = self.bedrock_client.invoke_model(
                         modelId=sonnet_3_7_model_id, body=claude_input
                     )
                     response_body = json.loads(response.get("body").read())
-                    claude_response = response_body.get("content", [{}])[0].get("text", "")
+                    claude_response = response_body.get("content", [{}])[0].get(
+                        "text", ""
+                    )
                     logger.info("Claude 3.7 Sonnet으로 에러 로그 분석 완료")
                     return claude_response
-                    
+
                 except Exception as e2:
                     logger.error(f"Claude 호출 완전 실패: {e2}")
                     return f"Claude 분석 실패: {str(e2)}"
-                    
+
         except Exception as e:
             logger.error(f"에러 로그 Claude 분석 중 오류: {e}")
             return f"분석 중 오류 발생: {str(e)}"
 
     async def _generate_error_log_html_report(
-        self, log_results: List[str], analysis_result: str, keyword: str, 
-        start_time: str, end_time: str, output_path: Path
+        self,
+        log_results: List[str],
+        analysis_result: str,
+        keyword: str,
+        start_time: str,
+        end_time: str,
+        output_path: Path,
     ) -> str:
         """에러 로그 분석 HTML 보고서 생성"""
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
+
             html_content = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -8784,28 +10101,37 @@ Knowledge Base 성능 최적화 가이드:
 
             # 출력 디렉토리 생성
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # HTML 파일 저장
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
-            
+
             return str(output_path)
-            
+
         except Exception as e:
             logger.error(f"HTML 보고서 생성 중 오류: {e}")
             return f"보고서 생성 실패: {str(e)}"
 
-    async def save_to_vector_store(self, content: str, topic: str, category: str = "examples", tags: list = None, force_save: bool = False) -> str:
+    async def save_to_vector_store(
+        self,
+        content: str,
+        topic: str,
+        category: str = "examples",
+        tags: list = None,
+        force_save: bool = False,
+    ) -> str:
         """대화 내용을 벡터 저장소에 저장 (중복 및 상충 검사 포함)"""
         try:
             import os
             from datetime import datetime
             import re
-            
+
             # 1. 강제 저장이 아닌 경우에만 중복/상충 검사
             if not force_save:
-                duplicate_check = await self._check_content_similarity(content, category)
-                
+                duplicate_check = await self._check_content_similarity(
+                    content, category
+                )
+
                 if duplicate_check["is_duplicate"]:
                     return f"""⚠️ 중복된 내용이 발견되었습니다!
 
@@ -8817,7 +10143,7 @@ Knowledge Base 성능 최적화 가이드:
 1. 'update_vector_content' 도구로 기존 문서 업데이트
 2. 'save_to_vector_store'에 force_save=true로 강제 저장
 3. 저장 취소"""
-                
+
                 if duplicate_check["has_conflict"]:
                     return f"""🚨 기존 내용과 상충되는 정보가 발견되었습니다!
 
@@ -8828,25 +10154,25 @@ Knowledge Base 성능 최적화 가이드:
 1. 새로운 정보가 맞다면 'update_vector_content'로 기존 문서 교체
 2. 기존 정보가 맞다면 저장 취소
 3. 둘 다 맞다면 'save_to_vector_store'에 force_save=true로 별도 저장"""
-            
+
             # 2. 중복/상충이 없으면 정상 저장 진행
             date_str = datetime.now().strftime("%Y%m%d")
-            clean_topic = re.sub(r'[^a-zA-Z0-9]', '', topic.lower())[:10]
+            clean_topic = re.sub(r"[^a-zA-Z0-9]", "", topic.lower())[:10]
             if not clean_topic:
                 clean_topic = "content"
-            
+
             filename = f"{date_str}_{clean_topic}.md"
-            
+
             # vector 폴더 생성
             vector_dir = "vector"
             os.makedirs(vector_dir, exist_ok=True)
-            
+
             # 메타데이터 생성
             if tags is None:
                 tags = ["conversation", "analysis"]
-            
+
             metadata_tags = tags + ["database", "optimization", "best-practices"]
-            
+
             # YAML 헤더 생성
             yaml_header = f"""---
 title: "{topic}"
@@ -8860,31 +10186,31 @@ similarity_checked: true
 ---
 
 """
-            
+
             # 파일 내용 생성
             file_content = yaml_header + content
-            
+
             # 로컬 파일 저장
             local_path = os.path.join(vector_dir, filename)
-            with open(local_path, 'w', encoding='utf-8') as f:
+            with open(local_path, "w", encoding="utf-8") as f:
                 f.write(file_content)
-            
+
             # S3에 업로드
             s3_client = boto3.client("s3", region_name="us-east-1")
             s3_key = f"{category}/{filename}"
-            
+
             s3_client.upload_file(
                 local_path,
                 "bedrockagent-hhs",
                 s3_key,
-                ExtraArgs={'ContentType': 'text/markdown'}
+                ExtraArgs={"ContentType": "text/markdown"},
             )
-            
+
             logger.info(f"벡터 저장소에 파일 저장 완료: {s3_key}")
-            
+
             # 자동으로 Knowledge Base 동기화 실행
             sync_result = await self.sync_knowledge_base()
-            
+
             return f"""✅ 벡터 저장소에 저장 완료!
 
 📁 로컬 저장: {local_path}
@@ -8895,7 +10221,7 @@ similarity_checked: true
 
 🔄 Knowledge Base 동기화 자동 실행:
 {sync_result}"""
-            
+
         except Exception as e:
             logger.error(f"벡터 저장소 저장 오류: {e}")
             return f"❌ 벡터 저장소 저장 중 오류가 발생했습니다: {str(e)}"
@@ -8905,20 +10231,22 @@ similarity_checked: true
         try:
             # 1. Knowledge Base에서 유사한 내용 검색
             similar_docs = await self._search_similar_content(new_content, category)
-            
+
             # 2. Claude AI로 중복/상충 분석
             if similar_docs:
-                analysis = await self._analyze_content_conflicts(new_content, similar_docs)
+                analysis = await self._analyze_content_conflicts(
+                    new_content, similar_docs
+                )
                 return analysis
-            
+
             return {
                 "is_duplicate": False,
                 "has_conflict": False,
                 "similarity_score": 0.0,
                 "similar_file": None,
-                "conflict_details": None
+                "conflict_details": None,
             }
-            
+
         except Exception as e:
             logger.error(f"내용 유사성 검사 오류: {e}")
             return {
@@ -8926,7 +10254,7 @@ similarity_checked: true
                 "has_conflict": False,
                 "similarity_score": 0.0,
                 "similar_file": None,
-                "conflict_details": None
+                "conflict_details": None,
             }
 
     async def _search_similar_content(self, content: str, category: str) -> list:
@@ -8935,29 +10263,31 @@ similarity_checked: true
             # 내용의 핵심 키워드 추출
             keywords = self._extract_keywords(content)
             search_query = " ".join(keywords[:5])  # 상위 5개 키워드 사용
-            
+
             response = self.bedrock_agent_client.retrieve(
                 knowledgeBaseId=self.knowledge_base_id,
                 retrievalQuery={"text": search_query},
                 retrievalConfiguration={
                     "vectorSearchConfiguration": {
                         "numberOfResults": 3,
-                        "overrideSearchType": "SEMANTIC"
+                        "overrideSearchType": "SEMANTIC",
                     }
-                }
+                },
             )
-            
+
             similar_docs = []
-            for result in response.get('retrievalResults', []):
-                if result['score'] > 0.7:  # 70% 이상 유사도
-                    similar_docs.append({
-                        "content": result['content']['text'],
-                        "score": result['score'],
-                        "source": result['location']['s3Location']['uri']
-                    })
-            
+            for result in response.get("retrievalResults", []):
+                if result["score"] > 0.7:  # 70% 이상 유사도
+                    similar_docs.append(
+                        {
+                            "content": result["content"]["text"],
+                            "score": result["score"],
+                            "source": result["location"]["s3Location"]["uri"],
+                        }
+                    )
+
             return similar_docs
-            
+
         except Exception as e:
             logger.error(f"유사 내용 검색 오류: {e}")
             return []
@@ -8965,37 +10295,56 @@ similarity_checked: true
     def _extract_keywords(self, content: str) -> list:
         """내용에서 핵심 키워드 추출"""
         import re
-        
+
         # 기본적인 키워드 추출 (실제로는 더 정교한 NLP 기법 사용 가능)
-        words = re.findall(r'\b[a-zA-Z가-힣]{3,}\b', content.lower())
-        
+        words = re.findall(r"\b[a-zA-Z가-힣]{3,}\b", content.lower())
+
         # 데이터베이스 관련 중요 키워드 우선순위
-        db_keywords = ['mysql', 'aurora', 'index', 'query', 'performance', 'optimization', 
-                      'table', 'database', 'sql', 'schema', 'connection', 'error', 'log']
-        
+        db_keywords = [
+            "mysql",
+            "aurora",
+            "index",
+            "query",
+            "performance",
+            "optimization",
+            "table",
+            "database",
+            "sql",
+            "schema",
+            "connection",
+            "error",
+            "log",
+        ]
+
         # 중요 키워드 우선 정렬
         keywords = []
         for keyword in db_keywords:
             if keyword in words:
                 keywords.append(keyword)
-        
+
         # 나머지 키워드 추가 (빈도순)
         word_freq = {}
         for word in words:
             if word not in keywords and len(word) > 3:
                 word_freq[word] = word_freq.get(word, 0) + 1
-        
+
         sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
         keywords.extend([word for word, freq in sorted_words[:10]])
-        
+
         return keywords
 
-    async def _analyze_content_conflicts(self, new_content: str, similar_docs: list) -> dict:
+    async def _analyze_content_conflicts(
+        self, new_content: str, similar_docs: list
+    ) -> dict:
         """Claude AI로 내용 중복/상충 분석"""
         try:
-            similar_content = "\n\n".join([f"문서 {i+1}: {doc['content'][:500]}..." 
-                                         for i, doc in enumerate(similar_docs)])
-            
+            similar_content = "\n\n".join(
+                [
+                    f"문서 {i+1}: {doc['content'][:500]}..."
+                    for i, doc in enumerate(similar_docs)
+                ]
+            )
+
             prompt = f"""다음 새로운 내용과 기존 문서들을 비교하여 중복성과 상충성을 분석해주세요.
 
 새로운 내용:
@@ -9017,47 +10366,49 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
             response = self.bedrock_runtime.invoke_model(
                 modelId="us.anthropic.claude-sonnet-4-20250514-v1:0",
-                body=json.dumps({
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 1000,
-                    "messages": [{"role": "user", "content": prompt}]
-                })
+                body=json.dumps(
+                    {
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "max_tokens": 1000,
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                ),
             )
-            
+
             response_body = json.loads(response.get("body").read())
             analysis_text = response_body.get("content", [{}])[0].get("text", "")
-            
+
             # 응답 파싱
             is_duplicate = "DUPLICATE: true" in analysis_text.lower()
             has_conflict = "CONFLICT: true" in analysis_text.lower()
-            
+
             # 유사도 점수 추출
             similarity_score = 0.0
             if similar_docs:
-                similarity_score = similar_docs[0]['score']
-            
+                similarity_score = similar_docs[0]["score"]
+
             # 가장 유사한 파일 추출
             similar_file = None
             if similar_docs:
-                similar_file = similar_docs[0]['source'].split('/')[-1]
-            
+                similar_file = similar_docs[0]["source"].split("/")[-1]
+
             # 상충 내용 추출
             conflict_details = None
             if has_conflict:
-                lines = analysis_text.split('\n')
+                lines = analysis_text.split("\n")
                 for line in lines:
-                    if 'CONFLICT_DETAILS:' in line:
-                        conflict_details = line.split('CONFLICT_DETAILS:')[1].strip()
+                    if "CONFLICT_DETAILS:" in line:
+                        conflict_details = line.split("CONFLICT_DETAILS:")[1].strip()
                         break
-            
+
             return {
                 "is_duplicate": is_duplicate,
                 "has_conflict": has_conflict,
                 "similarity_score": similarity_score,
                 "similar_file": similar_file,
-                "conflict_details": conflict_details
+                "conflict_details": conflict_details,
             }
-            
+
         except Exception as e:
             logger.error(f"내용 상충 분석 오류: {e}")
             return {
@@ -9065,24 +10416,25 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
                 "has_conflict": False,
                 "similarity_score": 0.0,
                 "similar_file": None,
-                "conflict_details": None
+                "conflict_details": None,
             }
 
     async def sync_knowledge_base(self) -> str:
         """Knowledge Base 데이터 소스 동기화"""
         try:
-            bedrock_agent_client = boto3.client("bedrock-agent", region_name="us-east-1")
-            
-            response = bedrock_agent_client.start_ingestion_job(
-                knowledgeBaseId="0WQUBRHVR8",
-                dataSourceId="A8VCUHOHEQ"
+            bedrock_agent_client = boto3.client(
+                "bedrock-agent", region_name="us-east-1"
             )
-            
-            job_id = response['ingestionJob']['ingestionJobId']
-            status = response['ingestionJob']['status']
-            
+
+            response = bedrock_agent_client.start_ingestion_job(
+                knowledgeBaseId="0WQUBRHVR8", dataSourceId="A8VCUHOHEQ"
+            )
+
+            job_id = response["ingestionJob"]["ingestionJobId"]
+            status = response["ingestionJob"]["status"]
+
             logger.info(f"Knowledge Base 동기화 시작: {job_id}")
-            
+
             return f"""✅ Knowledge Base 동기화 시작!
 
 🔄 작업 ID: {job_id}
@@ -9091,7 +10443,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
 💡 동기화가 완료되면 새로운 내용을 Knowledge Base에서 검색할 수 있습니다.
 상태 확인: AWS 콘솔 > Bedrock > Knowledge Base > 데이터 소스"""
-            
+
         except Exception as e:
             logger.error(f"Knowledge Base 동기화 오류: {e}")
             return f"❌ Knowledge Base 동기화 중 오류가 발생했습니다: {str(e)}"
@@ -9099,44 +10451,46 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
     async def query_vector_store(self, query: str, max_results: int = 5) -> str:
         """벡터 저장소에서 내용을 검색합니다"""
         try:
-            bedrock_agent_runtime = boto3.client('bedrock-agent-runtime', region_name='us-east-1')
-            
+            bedrock_agent_runtime = boto3.client(
+                "bedrock-agent-runtime", region_name="us-east-1"
+            )
+
             # Knowledge Base에서 검색
             response = bedrock_agent_runtime.retrieve(
                 knowledgeBaseId="0WQUBRHVR8",
-                retrievalQuery={'text': query},
+                retrievalQuery={"text": query},
                 retrievalConfiguration={
-                    'vectorSearchConfiguration': {
-                        'numberOfResults': max_results
-                    }
-                }
+                    "vectorSearchConfiguration": {"numberOfResults": max_results}
+                },
             )
-            
-            if not response.get('retrievalResults'):
+
+            if not response.get("retrievalResults"):
                 return f"""🔍 검색 결과가 없습니다.
 
 🔎 검색어: '{query}'
 💡 다른 키워드로 시도해보세요.
 📝 예시: 'HLL', 'lock', 'performance', 'SQL' 등"""
-            
+
             results = []
-            for i, result in enumerate(response['retrievalResults'], 1):
-                content = result['content']['text']
-                score = result.get('score', 0)
-                
+            for i, result in enumerate(response["retrievalResults"], 1):
+                content = result["content"]["text"]
+                score = result.get("score", 0)
+
                 # 메타데이터 추출
-                metadata = result.get('metadata', {})
-                source = metadata.get('source', '알 수 없음')
-                
+                metadata = result.get("metadata", {})
+                source = metadata.get("source", "알 수 없음")
+
                 # 내용 길이 제한
-                preview = content[:300] + '...' if len(content) > 300 else content
-                
-                results.append(f"""📄 **결과 {i}** (관련도: {score:.2f})
+                preview = content[:300] + "..." if len(content) > 300 else content
+
+                results.append(
+                    f"""📄 **결과 {i}** (관련도: {score:.2f})
 📁 출처: {source}
 📝 내용:
 {preview}
-""")
-            
+"""
+                )
+
             return f"""🔍 **벡터 저장소 검색 결과**
 
 🔎 검색어: "{query}"
@@ -9145,30 +10499,32 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 {chr(10).join(results)}
 
 💡 더 구체적인 검색을 원하시면 키워드를 세분화해보세요."""
-            
+
         except Exception as e:
             logger.error(f"벡터 검색 실패: {str(e)}")
             return f"벡터 검색 실패: {str(e)}"
 
-    async def update_vector_content(self, filename: str, new_content: str, update_mode: str = "append") -> str:
+    async def update_vector_content(
+        self, filename: str, new_content: str, update_mode: str = "append"
+    ) -> str:
         """기존 벡터 저장소 문서 업데이트"""
         try:
             import os
             from datetime import datetime
-            
+
             # 로컬 파일 경로
             local_path = os.path.join("vector", filename)
-            
+
             if not os.path.exists(local_path):
                 return f"❌ 파일을 찾을 수 없습니다: {filename}"
-            
+
             # 기존 파일 읽기
-            with open(local_path, 'r', encoding='utf-8') as f:
+            with open(local_path, "r", encoding="utf-8") as f:
                 existing_content = f.read()
-            
+
             # YAML 헤더와 본문 분리
-            if existing_content.startswith('---'):
-                parts = existing_content.split('---', 2)
+            if existing_content.startswith("---"):
+                parts = existing_content.split("---", 2)
                 if len(parts) >= 3:
                     yaml_header = f"---{parts[1]}---"
                     existing_body = parts[2].strip()
@@ -9178,21 +10534,22 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
             else:
                 yaml_header = ""
                 existing_body = existing_content
-            
+
             # 업데이트 모드에 따른 내용 처리
             if update_mode == "replace":
                 updated_body = new_content
             else:  # append
                 updated_body = f"{existing_body}\n\n## 업데이트 ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n{new_content}"
-            
+
             # YAML 헤더 업데이트
             if yaml_header:
                 # last_updated 필드 업데이트
                 import re
+
                 yaml_header = re.sub(
                     r'last_updated: "[^"]*"',
                     f'last_updated: "{datetime.now().strftime("%Y-%m-%d")}"',
-                    yaml_header
+                    yaml_header,
                 )
                 # version 업데이트
                 version_match = re.search(r'version: "([^"]*)"', yaml_header)
@@ -9203,42 +10560,44 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
                         yaml_header = re.sub(
                             r'version: "[^"]*"',
                             f'version: "{version_num:.1f}"',
-                            yaml_header
+                            yaml_header,
                         )
                     except:
                         pass
-            
+
             # 새로운 파일 내용 생성
-            updated_content = f"{yaml_header}\n\n{updated_body}" if yaml_header else updated_body
-            
+            updated_content = (
+                f"{yaml_header}\n\n{updated_body}" if yaml_header else updated_body
+            )
+
             # 로컬 파일 업데이트
-            with open(local_path, 'w', encoding='utf-8') as f:
+            with open(local_path, "w", encoding="utf-8") as f:
                 f.write(updated_content)
-            
+
             # S3 업데이트
             s3_client = boto3.client("s3", region_name="us-east-1")
-            
+
             # 카테고리 추출 (파일명에서 또는 YAML에서)
             category = "examples"  # 기본값
             if yaml_header:
                 category_match = re.search(r'category: "([^"]*)"', yaml_header)
                 if category_match:
                     category = category_match.group(1)
-            
+
             s3_key = f"{category}/{filename}"
-            
+
             s3_client.upload_file(
                 local_path,
                 "bedrockagent-hhs",
                 s3_key,
-                ExtraArgs={'ContentType': 'text/markdown'}
+                ExtraArgs={"ContentType": "text/markdown"},
             )
-            
+
             logger.info(f"벡터 저장소 파일 업데이트 완료: {s3_key}")
-            
+
             # 자동으로 Knowledge Base 동기화 실행
             sync_result = await self.sync_knowledge_base()
-            
+
             return f"""✅ 벡터 저장소 문서 업데이트 완료!
 
 📁 로컬 파일: {local_path}
@@ -9248,7 +10607,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
 🔄 Knowledge Base 동기화 자동 실행:
 {sync_result}"""
-            
+
         except Exception as e:
             logger.error(f"벡터 저장소 업데이트 오류: {e}")
             return f"❌ 벡터 저장소 업데이트 중 오류가 발생했습니다: {str(e)}"
@@ -9449,15 +10808,15 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="detect_metric_outliers",
-            description="메트릭 데이터에서 아웃라이어를 탐지합니다",
+            description="개선된 아웃라이어 탐지 - 메트릭별 맞춤 임계값과 물리적 제약 적용",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "csv_file": {"type": "string", "description": "분석할 CSV 파일명"},
                     "std_threshold": {
                         "type": "number",
-                        "description": "표준편차 임계값 (기본값: 2.0)",
-                        "default": 2.0,
+                        "description": "IQR 방식용 임계값 (기본값: 3.0, 메트릭별 맞춤 기준 우선 적용)",
+                        "default": 3.0,
                     },
                 },
                 "required": ["csv_file"],
@@ -9533,8 +10892,8 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="collect_slow_queries",
-            description="느린 쿼리를 수집하는 SQL을 생성합니다",
+            name="debug_cloudwatch_collection",
+            description="CloudWatch 슬로우 쿼리 수집 디버그",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -9542,12 +10901,52 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "데이터베이스 시크릿 이름",
                     },
-                    "db_instance_identifier": {
+                    "start_time": {
                         "type": "string",
-                        "description": "특정 인스턴스 식별자 (선택사항)",
+                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS, KST 기준)",
+                    },
+                    "end_time": {
+                        "type": "string", 
+                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS, KST 기준)",
+                    },
+                },
+                "required": ["database_secret", "start_time", "end_time"],
+            },
+        ),
+        types.Tool(
+            name="collect_slow_queries",
+            description="슬로우 쿼리 로그에서 느린 쿼리를 수집합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database_secret": {
+                        "type": "string",
+                        "description": "데이터베이스 시크릿 이름",
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS, KST 기준, 선택사항)",
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS, KST 기준, 선택사항)",
                     },
                 },
                 "required": ["database_secret"],
+            },
+        ),
+        types.Tool(
+            name="enable_slow_query_log_exports",
+            description="Aurora 클러스터의 SlowQuery 로그 CloudWatch 전송을 활성화합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cluster_identifier": {
+                        "type": "string",
+                        "description": "Aurora 클러스터 식별자",
+                    },
+                },
+                "required": ["cluster_identifier"],
             },
         ),
         types.Tool(
@@ -9684,8 +11083,13 @@ async def handle_list_tools() -> list[types.Tool]:
                     "category": {
                         "type": "string",
                         "description": "카테고리 (database-standards, performance-optimization, troubleshooting, examples 중 선택)",
-                        "enum": ["database-standards", "performance-optimization", "troubleshooting", "examples"],
-                        "default": "examples"
+                        "enum": [
+                            "database-standards",
+                            "performance-optimization",
+                            "troubleshooting",
+                            "examples",
+                        ],
+                        "default": "examples",
                     },
                     "tags": {
                         "type": "array",
@@ -9695,7 +11099,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     "force_save": {
                         "type": "boolean",
                         "description": "중복/상충 검사 무시하고 강제 저장 (선택사항)",
-                        "default": False
+                        "default": False,
                     },
                 },
                 "required": ["content", "topic"],
@@ -9719,7 +11123,7 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "업데이트 모드 (append: 추가, replace: 교체)",
                         "enum": ["append", "replace"],
-                        "default": "append"
+                        "default": "append",
                     },
                 },
                 "required": ["filename", "new_content"],
@@ -9808,6 +11212,20 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["database_secret", "db_cluster_identifier"],
             },
         ),
+        types.Tool(
+            name="set_default_region",
+            description="기본 AWS 리전을 변경합니다",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "region_name": {
+                        "type": "string",
+                        "description": "설정할 AWS 리전 (예: ap-northeast-2, us-east-1, eu-west-1)",
+                    }
+                },
+                "required": ["region_name"],
+            },
+        ),
     ]
 
 
@@ -9860,7 +11278,7 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             )
         elif name == "detect_metric_outliers":
             result = await db_assistant.detect_metric_outliers(
-                arguments["csv_file"], arguments.get("std_threshold", 2.0)
+                arguments["csv_file"], arguments.get("std_threshold", 3.0)
             )
         elif name == "perform_regression_analysis":
             result = await db_assistant.perform_regression_analysis(
@@ -9880,9 +11298,21 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             )
         elif name == "get_metric_summary":
             result = await db_assistant.get_metric_summary(arguments["csv_file"])
+        elif name == "debug_cloudwatch_collection":
+            result = await db_assistant.debug_cloudwatch_collection(
+                arguments["database_secret"],
+                arguments["start_time"],
+                arguments["end_time"]
+            )
         elif name == "collect_slow_queries":
             result = await db_assistant.collect_slow_queries(
-                arguments["database_secret"], arguments.get("db_instance_identifier")
+                arguments["database_secret"], 
+                arguments.get("start_time"), 
+                arguments.get("end_time")
+            )
+        elif name == "enable_slow_query_log_exports":
+            result = await db_assistant.enable_slow_query_log_exports(
+                arguments["cluster_identifier"]
             )
         elif name == "collect_memory_intensive_queries":
             result = await db_assistant.collect_memory_intensive_queries(
@@ -9898,9 +11328,9 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             )
         elif name == "analyze_aurora_mysql_error_logs":
             result = await db_assistant.analyze_aurora_mysql_error_logs(
-                arguments["keyword"], 
-                arguments["start_datetime_str"], 
-                arguments["end_datetime_str"]
+                arguments["keyword"],
+                arguments["start_datetime_str"],
+                arguments["end_datetime_str"],
             )
         elif name == "save_to_vector_store":
             result = await db_assistant.save_to_vector_store(
@@ -9908,20 +11338,19 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                 arguments["topic"],
                 arguments.get("category", "examples"),
                 arguments.get("tags"),
-                arguments.get("force_save", False)
+                arguments.get("force_save", False),
             )
         elif name == "update_vector_content":
             result = await db_assistant.update_vector_content(
                 arguments["filename"],
                 arguments["new_content"],
-                arguments.get("update_mode", "append")
+                arguments.get("update_mode", "append"),
             )
         elif name == "sync_knowledge_base":
             result = await db_assistant.sync_knowledge_base()
         elif name == "query_vector_store":
             result = await db_assistant.query_vector_store(
-                arguments["query"],
-                arguments.get("max_results", 5)
+                arguments["query"], arguments.get("max_results", 5)
             )
         elif name == "test_individual_query_validation":
             result = await db_assistant.test_individual_query_validation(
@@ -9948,6 +11377,8 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                 arguments.get("hours", 24),
                 arguments.get("region", "ap-northeast-2"),
             )
+        elif name == "set_default_region":
+            result = db_assistant.set_default_region(arguments["region_name"])
         else:
             result = f"알 수 없는 도구: {name}"
 
