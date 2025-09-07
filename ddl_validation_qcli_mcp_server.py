@@ -6736,13 +6736,13 @@ Knowledge Base 성능 최적화 가이드:
             
             slow_queries = await self.collect_slow_queries(database_secret)
             memory_queries = await self.collect_memory_intensive_queries(
-                database_secret, db_instance_identifier
+                database_secret, db_instance_identifier, None, None
             )
             cpu_queries = await self.collect_cpu_intensive_queries(
-                database_secret, db_instance_identifier
+                database_secret, db_instance_identifier, None, None
             )
             temp_queries = await self.collect_temp_space_intensive_queries(
-                database_secret, db_instance_identifier
+                database_secret, db_instance_identifier, None, None
             )
             
             # SQL 파일들이 생성되었는지 확인하고 추적
@@ -9445,7 +9445,8 @@ Knowledge Base 성능 최적화 가이드:
             return f"❌ SlowQuery 로그 활성화 실패: {str(e)}"
 
     async def collect_memory_intensive_queries(
-        self, database_secret: str, db_instance_identifier: str = None
+        self, database_secret: str, db_instance_identifier: str = None,
+        start_time: str = None, end_time: str = None
     ) -> str:
         """메모리 집약적 쿼리 수집 및 SQL 파일 생성"""
         try:
@@ -9471,10 +9472,18 @@ Knowledge Base 성능 최적화 가이드:
 
             collected_queries = set()  # 중복 제거용
 
+            # 시간 필터 조건 생성
+            time_filter = ""
+            if start_time and end_time:
+                time_filter = f"AND FIRST_SEEN >= '{start_time}' AND LAST_SEEN <= '{end_time}'"
+            elif start_time:
+                time_filter = f"AND FIRST_SEEN >= '{start_time}'"
+            elif end_time:
+                time_filter = f"AND LAST_SEEN <= '{end_time}'"
+
             # 1. performance_schema에서 메모리 집약적 쿼리 수집 시도
             try:
-                cursor.execute(
-                    """
+                query_sql = f"""
                     SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
@@ -9482,10 +9491,11 @@ Knowledge Base 성능 최적화 가이드:
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
                         AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
+                        {time_filter}
                     ORDER BY MAX_MEMORY_USED DESC 
                     LIMIT 10
                 """
-                )
+                cursor.execute(query_sql)
 
                 for (query,) in cursor.fetchall():
                     if query and query.strip():
@@ -9524,7 +9534,8 @@ Knowledge Base 성능 최적화 가이드:
             return f"❌ 메모리 집약적 쿼리 수집 실패: {str(e)}"
 
     async def collect_cpu_intensive_queries(
-        self, database_secret: str, db_instance_identifier: str = None
+        self, database_secret: str, db_instance_identifier: str = None, 
+        start_time: str = None, end_time: str = None
     ) -> str:
         """CPU 집약적 쿼리 수집 및 SQL 파일 생성"""
         try:
@@ -9550,10 +9561,18 @@ Knowledge Base 성능 최적화 가이드:
 
             collected_queries = set()  # 중복 제거용
 
+            # 시간 필터 조건 생성
+            time_filter = ""
+            if start_time and end_time:
+                time_filter = f"AND FIRST_SEEN >= '{start_time}' AND LAST_SEEN <= '{end_time}'"
+            elif start_time:
+                time_filter = f"AND FIRST_SEEN >= '{start_time}'"
+            elif end_time:
+                time_filter = f"AND LAST_SEEN <= '{end_time}'"
+
             # 1. performance_schema에서 CPU 집약적 쿼리 수집 시도
             try:
-                cursor.execute(
-                    """
+                query_sql = f"""
                     SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
@@ -9561,10 +9580,11 @@ Knowledge Base 성능 최적화 가이드:
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
                         AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
+                        {time_filter}
                     ORDER BY SUM_TIMER_WAIT DESC 
                     LIMIT 10
                 """
-                )
+                cursor.execute(query_sql)
 
                 for (query,) in cursor.fetchall():
                     if query and query.strip():
@@ -9630,7 +9650,8 @@ Knowledge Base 성능 최적화 가이드:
             return f"❌ CPU 집약적 쿼리 수집 실패: {str(e)}"
 
     async def collect_temp_space_intensive_queries(
-        self, database_secret: str, db_instance_identifier: str = None
+        self, database_secret: str, db_instance_identifier: str = None,
+        start_time: str = None, end_time: str = None
     ) -> str:
         """임시 공간 집약적 쿼리 수집 및 SQL 파일 생성"""
         try:
@@ -9658,10 +9679,18 @@ Knowledge Base 성능 최적화 가이드:
 
             collected_queries = set()  # 중복 제거용
 
+            # 시간 필터 조건 생성
+            time_filter = ""
+            if start_time and end_time:
+                time_filter = f"AND FIRST_SEEN >= '{start_time}' AND LAST_SEEN <= '{end_time}'"
+            elif start_time:
+                time_filter = f"AND FIRST_SEEN >= '{start_time}'"
+            elif end_time:
+                time_filter = f"AND LAST_SEEN <= '{end_time}'"
+
             # 1. performance_schema에서 임시 공간 집약적 쿼리 수집 시도
             try:
-                cursor.execute(
-                    """
+                query_sql = f"""
                     SELECT QUERY_SAMPLE_TEXT 
                     FROM performance_schema.events_statements_summary_by_digest 
                     WHERE DIGEST_TEXT IS NOT NULL 
@@ -9669,10 +9698,11 @@ Knowledge Base 성능 최적화 가이드:
                         AND DIGEST_TEXT NOT LIKE '%performance_schema%'
                         AND DIGEST_TEXT NOT LIKE '%information_schema%'
                         AND DIGEST_TEXT NOT LIKE 'EXPLAIN%'
+                        {time_filter}
                     ORDER BY (SUM_CREATED_TMP_DISK_TABLES + SUM_SORT_MERGE_PASSES) DESC 
                     LIMIT 10
                 """
-                )
+                cursor.execute(query_sql)
 
                 for (query,) in cursor.fetchall():
                     if query and query.strip():
@@ -10963,6 +10993,14 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "특정 인스턴스 식별자 (선택사항)",
                     },
+                    "start_time": {
+                        "type": "string",
+                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
+                    },
+                    "end_time": {
+                        "type": "string", 
+                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
+                    },
                 },
                 "required": ["database_secret"],
             },
@@ -10981,6 +11019,14 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "특정 인스턴스 식별자 (선택사항)",
                     },
+                    "start_time": {
+                        "type": "string",
+                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
+                    },
                 },
                 "required": ["database_secret"],
             },
@@ -10998,6 +11044,14 @@ async def handle_list_tools() -> list[types.Tool]:
                     "db_instance_identifier": {
                         "type": "string",
                         "description": "특정 인스턴스 식별자 (선택사항)",
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
                     },
                 },
                 "required": ["database_secret"],
@@ -11316,15 +11370,24 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             )
         elif name == "collect_memory_intensive_queries":
             result = await db_assistant.collect_memory_intensive_queries(
-                arguments["database_secret"], arguments.get("db_instance_identifier")
+                arguments["database_secret"], 
+                arguments.get("db_instance_identifier"),
+                arguments.get("start_time"),
+                arguments.get("end_time")
             )
         elif name == "collect_cpu_intensive_queries":
             result = await db_assistant.collect_cpu_intensive_queries(
-                arguments["database_secret"], arguments.get("db_instance_identifier")
+                arguments["database_secret"], 
+                arguments.get("db_instance_identifier"),
+                arguments.get("start_time"),
+                arguments.get("end_time")
             )
         elif name == "collect_temp_space_intensive_queries":
             result = await db_assistant.collect_temp_space_intensive_queries(
-                arguments["database_secret"], arguments.get("db_instance_identifier")
+                arguments["database_secret"], 
+                arguments.get("db_instance_identifier"),
+                arguments.get("start_time"),
+                arguments.get("end_time")
             )
         elif name == "analyze_aurora_mysql_error_logs":
             result = await db_assistant.analyze_aurora_mysql_error_logs(
