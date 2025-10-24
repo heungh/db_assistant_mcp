@@ -180,10 +180,26 @@ class DBAssistantMCPServer:
 
             result = json.loads(response['Payload'].read())
 
+            # 상세 로깅: result 타입 확인
+            logger.debug(f"Lambda result 타입: {type(result)}")
+            logger.debug(f"Lambda result 내용: {str(result)[:500]}")
+
             if response['StatusCode'] == 200 and result.get('statusCode') == 200:
                 body = result.get('body', '{}')
+                logger.debug(f"Lambda body 타입 (파싱 전): {type(body)}")
+
                 if isinstance(body, str):
                     body = json.loads(body)
+                    logger.debug(f"Lambda body 타입 (파싱 후): {type(body)}")
+
+                # body가 딕셔너리가 아닌 경우 처리
+                if not isinstance(body, dict):
+                    logger.error(f"Lambda body가 딕셔너리가 아님: {type(body)}, 내용: {str(body)[:200]}")
+                    return {
+                        'success': False,
+                        'error': f'Lambda 응답 형식 오류: body가 {type(body).__name__} 타입입니다'
+                    }
+
                 logger.info(f"Lambda 호출 성공: {full_name}")
                 return body
             else:
@@ -2198,6 +2214,13 @@ SQL 쿼리:"""
                                 self.selected_database,
                                 ddl_content
                             )
+
+                            # 타입 체크: ddl_validation이 딕셔너리가 아닌 경우 처리
+                            if not isinstance(ddl_validation, dict):
+                                logger.error(f"ddl_validation이 딕셔너리가 아님: {type(ddl_validation)}, 내용: {str(ddl_validation)[:200]}")
+                                issues.append(f"스키마 검증 오류: Lambda 응답 형식 오류 (타입: {type(ddl_validation).__name__})")
+                                ddl_validation = {'success': False, 'error': f'응답 타입 오류: {type(ddl_validation).__name__}'}
+
                             debug_log(
                                 f"혼합 파일 Lambda 스키마 검증 완료: Success={ddl_validation.get('success')}, Valid={ddl_validation.get('valid')}, Issues={len(ddl_validation.get('issues', []))}"
                             )
@@ -2250,6 +2273,12 @@ SQL 쿼리:"""
                                 self.selected_database,
                                 cleaned_stmt
                             )
+
+                            # 타입 체크: explain_result가 딕셔너리가 아닌 경우 처리
+                            if not isinstance(explain_result, dict):
+                                logger.error(f"쿼리 {i+1} explain_result가 딕셔너리가 아님: {type(explain_result)}, 내용: {str(explain_result)[:200]}")
+                                issues.append(f"쿼리 {i+1} EXPLAIN 오류: Lambda 응답 형식 오류 (타입: {type(explain_result).__name__})")
+                                continue
 
                             # Lambda 결과 처리
                             if explain_result.get('success'):
@@ -2717,14 +2746,26 @@ SQL 쿼리:"""
             schema_details = []
 
             # 순서대로 정렬하여 처리
-            sorted_items = sorted(
-                schema_info.items(), key=lambda x: x[1].get("order", 0)
-            )
+            # 타입 체크: schema_info의 값이 딕셔너리인지 확인
+            try:
+                sorted_items = sorted(
+                    schema_info.items(),
+                    key=lambda x: x[1].get("order", 0) if isinstance(x[1], dict) else 0
+                )
+            except Exception as sort_error:
+                logger.error(f"schema_info 정렬 오류: {sort_error}, schema_info 타입: {type(schema_info)}")
+                # 정렬 실패 시 그대로 사용
+                sorted_items = list(schema_info.items()) if isinstance(schema_info, dict) else []
 
             for key, info in sorted_items:
+                # 타입 체크: info가 딕셔너리가 아닌 경우 스킵
+                if not isinstance(info, dict):
+                    logger.warning(f"schema_info[{key}]가 딕셔너리가 아님: {type(info)}")
+                    continue
+
                 order = info.get("order", 0)
 
-                if info["type"] == "table":
+                if info.get("type") == "table":
                     table_name = info.get("table_name", key)
 
                     if "columns" in info:
@@ -2760,12 +2801,12 @@ SQL 쿼리:"""
                             else "DROP"
                         )
                         schema_details.append(
-                            f"[{order}] {action} TABLE '{table_name}': DB존재={info['exists']}"
+                            f"[{order}] {action} TABLE '{table_name}': DB존재={info.get('exists', 'Unknown')}"
                         )
 
-                elif info["type"] == "index":
+                elif info.get("type") == "index":
                     table_name = info.get("table_name", key.split(".")[0])
-                    index_name = info["index_name"]
+                    index_name = info.get("index_name", "Unknown")
 
                     if "duplicate_column_indexes" in info:
                         # CREATE INDEX 케이스
@@ -3022,7 +3063,30 @@ Knowledge Base 참고 정보:
                 modelId=sonnet_4_model_id, body=claude_input
             )
             response_body = json.loads(response.get("body").read())
-            return response_body.get("content", [{}])[0].get("text", "")
+
+            # response_body가 딕셔너리인지 확인
+            if not isinstance(response_body, dict):
+                logger.error(f"Claude 응답이 딕셔너리가 아님: {type(response_body)}")
+                return f"Claude 응답 형식 오류: 응답이 딕셔너리가 아닙니다 (타입: {type(response_body).__name__})"
+
+            # 안전한 타입 체크 및 데이터 추출
+            content = response_body.get("content", [])
+            if isinstance(content, list) and len(content) > 0:
+                first_content = content[0]
+                if isinstance(first_content, dict):
+                    text_result = first_content.get("text", "")
+                    if text_result:
+                        return text_result
+                    else:
+                        logger.error("Claude 응답의 text 필드가 비어있음")
+                        return "Claude 응답 형식 오류: text 필드가 비어있음"
+                else:
+                    logger.error(f"Claude 응답의 content[0]이 딕셔너리가 아님: {type(first_content)}")
+                    return f"Claude 응답 형식 오류: content[0]의 타입이 {type(first_content).__name__}입니다"
+            else:
+                logger.error(f"Claude 응답의 content가 비어있거나 리스트가 아님: {type(content)}")
+                return f"Claude 응답 형식 오류: content가 비어있거나 리스트가 아닙니다"
+
         except Exception as e:
             logger.warning(
                 f"Claude Sonnet 4 호출 실패 → Claude 3.7 Sonnet cross-region profile로 fallback: {e}"
@@ -3033,7 +3097,30 @@ Knowledge Base 참고 정보:
                     modelId=sonnet_3_7_model_id, body=claude_input
                 )
                 response_body = json.loads(response.get("body").read())
-                return response_body.get("content", [{}])[0].get("text", "")
+
+                # response_body가 딕셔너리인지 확인
+                if not isinstance(response_body, dict):
+                    logger.error(f"Claude 3.7 응답이 딕셔너리가 아님: {type(response_body)}")
+                    return f"Claude 응답 형식 오류: 응답이 딕셔너리가 아닙니다 (타입: {type(response_body).__name__})"
+
+                # 안전한 타입 체크 및 데이터 추출
+                content = response_body.get("content", [])
+                if isinstance(content, list) and len(content) > 0:
+                    first_content = content[0]
+                    if isinstance(first_content, dict):
+                        text_result = first_content.get("text", "")
+                        if text_result:
+                            return text_result
+                        else:
+                            logger.error("Claude 3.7 응답의 text 필드가 비어있음")
+                            return "Claude 응답 형식 오류: text 필드가 비어있음"
+                    else:
+                        logger.error(f"Claude 3.7 응답의 content[0]이 딕셔너리가 아님: {type(first_content)}")
+                        return f"Claude 응답 형식 오류: content[0]의 타입이 {type(first_content).__name__}입니다"
+                else:
+                    logger.error(f"Claude 3.7 응답의 content가 비어있거나 리스트가 아님: {type(content)}")
+                    return f"Claude 응답 형식 오류: content가 비어있거나 리스트가 아닙니다"
+
             except Exception as e:
                 logger.error(f"Claude 3.7 Sonnet 호출 오류: {e}")
                 return f"Claude 호출 중 오류 발생: {str(e)}"
@@ -4638,7 +4725,7 @@ Knowledge Base 성능 최적화 가이드:
         # 상세 디버그 로그 추가
         try:
             with open(
-                "/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt",
+                OUTPUT_DIR / "html_debug.txt",
                 "a",
                 encoding="utf-8",
             ) as f:
@@ -4655,7 +4742,7 @@ Knowledge Base 성능 최적화 가이드:
         # 디버그 로그 추가
         try:
             with open(
-                "/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt",
+                OUTPUT_DIR / "html_debug.txt",
                 "a",
                 encoding="utf-8",
             ) as f:
@@ -5045,7 +5132,7 @@ Knowledge Base 성능 최적화 가이드:
             # 파일 생성 확인 디버그
             try:
                 with open(
-                    "/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt",
+                    OUTPUT_DIR / "html_debug.txt",
                     "a",
                     encoding="utf-8",
                 ) as f:
@@ -5060,7 +5147,7 @@ Knowledge Base 성능 최적화 가이드:
             # 상세 오류 정보를 디버그 파일에 기록
             try:
                 with open(
-                    "/Users/heungh/Documents/SA/05.Project/01.Infra-Assistant/01.DB-Assistant/output/html_debug.txt",
+                    OUTPUT_DIR / "html_debug.txt",
                     "a",
                     encoding="utf-8",
                 ) as f:
