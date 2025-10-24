@@ -25,7 +25,8 @@
 
 ### 핵심 가치
 
-- **AI 기반 분석**: AWS Bedrock (Claude Sonnet 4)을 활용한 지능형 성능 분석
+- **AI 기반 분석**: AWS Bedrock (Claude Sonnet 4, 리전: us-west-2)을 활용한 지능형 성능 분석
+- **RAG 기반 권장사항**: Bedrock Knowledge Base (리전: us-east-1)를 통한 Aurora MySQL 최적화 가이드 검색
 - **포괄적 리포트**: HTML 형식의 정교한 성능 진단 보고서 자동 생성
 - **하이브리드 아키텍처**: Lambda + EC2 구조로 확장성과 복잡한 분석의 균형 달성
 - **자연어 인터페이스**: Amazon Q CLI를 통한 대화형 데이터베이스 관리
@@ -453,6 +454,54 @@ aws s3 mb s3://db-assistant-reports --region ap-northeast-2
 aws s3 mb s3://db-assistant-query-results-dev --region ap-northeast-2
 ```
 
+### 6. Bedrock 및 Knowledge Base 설정
+
+```bash
+# Bedrock 리전: us-west-2 (Claude Sonnet 4 사용)
+# Knowledge Base 리전: us-east-1 (Aurora MySQL 최적화 가이드)
+
+# IAM 권한 확인 (EC2 인스턴스 롤 또는 사용자 권한)
+# - bedrock:InvokeModel (us-west-2)
+# - bedrock-agent:Retrieve (us-east-1)
+
+# 필요한 IAM 정책 예시
+cat > bedrock-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel"
+      ],
+      "Resource": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agent:Retrieve"
+      ],
+      "Resource": "arn:aws:bedrock:us-east-1:*:knowledge-base/*"
+    }
+  ]
+}
+EOF
+
+# IAM 정책 생성 및 연결 (선택사항)
+aws iam create-policy \
+  --policy-name db-assistant-bedrock-policy \
+  --policy-document file://bedrock-policy.json
+
+# EC2 인스턴스 롤에 정책 연결 (EC2 사용 시)
+# aws iam attach-role-policy \
+#   --role-name your-ec2-role-name \
+#   --policy-arn arn:aws:iam::YOUR-ACCOUNT-ID:policy/db-assistant-bedrock-policy
+```
+
+**Knowledge Base ID 설정**:
+- Knowledge Base ID는 `utils/constants.py`에서 `KNOWLEDGE_BASE_ID` 변수로 관리됩니다
+- 실제 Knowledge Base를 생성한 후 ID를 업데이트해야 합니다
+
 ---
 
 ## 사용 방법
@@ -557,7 +606,7 @@ async def _call_lambda(self, function_name: str, payload: dict) -> dict:
 
 ### 2. 스키마 검증 Lambda 통합 (`validate_schema_lambda`)
 
-**위치**: `db_assistant_mcp_server.py:9935-9995`
+**위치**: `db_assistant_mcp_server.py:9052-9112`
 
 ```python
 async def validate_schema_lambda(
@@ -632,7 +681,7 @@ async def validate_schema_lambda(
 
 ### 3. EXPLAIN 분석 Lambda 통합 (`explain_query_lambda`)
 
-**위치**: `db_assistant_mcp_server.py:9997-10055`
+**위치**: `db_assistant_mcp_server.py:9114-9172`
 
 ```python
 async def explain_query_lambda(
@@ -1043,25 +1092,25 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 1. **validate_schema**
    - 함수명: `db-assistant-validate-schema-dev`
    - 역할: DDL 스키마 검증 (CREATE TABLE, ALTER TABLE, DROP TABLE, CREATE INDEX 등)
-   - 호출 위치: `db_assistant_mcp_server.py:9966`
+   - 호출 위치: `db_assistant_mcp_server.py:9083`
    - 사용: MCP 서버 → Lambda (DB 연결)
 
 2. **explain_query**
    - 함수명: `db-assistant-explain-query-dev`
    - 역할: 쿼리 실행 계획 분석 (EXPLAIN)
-   - 호출 위치: `db_assistant_mcp_server.py:10028`
+   - 호출 위치: `db_assistant_mcp_server.py:9145`
    - 사용: MCP 서버 → Lambda (DB 연결)
 
 3. **get_rds_cluster_info**
    - 함수명: `db-assistant-get-rds-cluster-info-dev`
    - 역할: RDS 클러스터/인스턴스 메타데이터 수집
-   - 호출 위치: `db_assistant_mcp_server.py:8248`
+   - 호출 위치: `db_assistant_mcp_server.py:7369`
    - 사용: MCP 서버 → Lambda (RDS API)
 
 4. **get_cloudwatch_metrics_raw**
    - 함수명: `db-assistant-get-cloudwatch-metrics-raw-dev`
    - 역할: CloudWatch 메트릭 수집 (936개 데이터 포인트)
-   - 호출 위치: `db_assistant_mcp_server.py:8279`
+   - 호출 위치: `db_assistant_mcp_server.py:7400`
    - 사용: MCP 서버 → Lambda (CloudWatch API)
 
 ### 성능 분석 함수 (6개)
@@ -1069,44 +1118,44 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 5. **collect_cpu_intensive_queries**
    - 함수명: `db-assistant-collect-cpu-intensive-queries-dev`
    - 역할: CPU 집약 쿼리 수집 (CloudWatch Logs Insights)
-   - 호출 위치: `db_assistant_mcp_server.py:9787`
+   - 호출 위치: `db_assistant_mcp_server.py:8904`
 
 6. **collect_temp_space_intensive_queries**
    - 함수명: `db-assistant-collect-temp-space-intensive-queries-dev`
    - 역할: 임시 공간 집약 쿼리 수집 (tmp_table_size, sort_buffer_size)
-   - 호출 위치: `db_assistant_mcp_server.py:9865`
+   - 호출 위치: `db_assistant_mcp_server.py:8982`
 
 7. **collect_memory_intensive_queries**
    - 함수명: `db-assistant-collect-memory-intensive-queries-dev`
    - 역할: 메모리 집약 쿼리 수집 (메모리 사용량 기준)
-   - 호출 위치: `db_assistant_mcp_server.py:9708`
+   - 호출 위치: `db_assistant_mcp_server.py:8825`
 
 8. **collect_slow_queries_cloudwatch**
    - 함수명: `db-assistant-collect-slow-queries-cloudwatch-dev`
    - 역할: CloudWatch Logs에서 Slow Query 수집
-   - 호출 위치: `db_assistant_mcp_server.py:9427`
+   - 호출 위치: `db_assistant_mcp_server.py:8544`
 
 9. **collect_cluster_metrics**
    - 함수명: `db-assistant-collect-cluster-metrics-dev`
    - 역할: 클러스터 전체 메트릭 수집 (모든 멤버 인스턴스)
-   - 호출 위치: `db_assistant_mcp_server.py:7471`
+   - 호출 위치: `db_assistant_mcp_server.py:6592`
 
 10. **collect_cluster_events**
     - 함수명: `db-assistant-collect-cluster-events-dev`
     - 역할: 클러스터 이벤트 수집 (장애, 유지보수 등)
-    - 호출 위치: `db_assistant_mcp_server.py:7505`
+    - 호출 위치: `db_assistant_mcp_server.py:6626`
 
 ### 리소스 관리 함수 (2개)
 
 11. **get_secret**
     - 함수명: `db-assistant-get-secret-dev`
     - 역할: Secrets Manager에서 Secret 조회
-    - 호출 위치: `db_assistant_mcp_server.py:308` (동기 호출: `asyncio.run`)
+    - 호출 위치: `db_assistant_mcp_server.py:324` (동기 호출: `asyncio.run`)
 
 12. **list_secrets**
     - 함수명: `db-assistant-list-secrets-dev`
     - 역할: Secrets Manager 목록 조회 (키워드 검색)
-    - 호출 위치: `db_assistant_mcp_server.py:329` (동기 호출: `asyncio.run`)
+    - 호출 위치: `db_assistant_mcp_server.py:345` (동기 호출: `asyncio.run`)
 
 ---
 
@@ -1943,6 +1992,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
 ---
 
-**작성일**: 2025-10-24
-**버전**: v5.1 (하이브리드 아키텍처 + Lambda 통합)
-**상태**: 모든 기능 구현 및 테스트 완료
+**작성일**: 2025-10-25
+**버전**: v5.2 (하이브리드 아키텍처 + Lambda 통합 + 리전 정보 명시)
+**상태**: 모든 기능 구현 및 테스트 완료, README 업데이트 완료
