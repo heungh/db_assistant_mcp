@@ -119,13 +119,13 @@ graph TB
 
 ```
 db-assistant/
-├── README.md                           # 프로젝트 전체 README
-├── README_MCP_SERVER.md                # 이 파일 (MCP 서버 가이드)
+├── README.md                           # 이 파일
 ├── requirements.txt                    # Python 의존성
 │
 ├── db_assistant_mcp_server.py          # 🎯 MCP 메인 서버 (500KB, 10000+ lines)
 │
-├── lambda-functions/                   # Lambda 함수들 (36개)
+├── lambda-functions/                   # Lambda 함수들 (실제 사용: 12개)
+│   │
 │   ├── validate_schema/                # ⭐ DDL 스키마 검증
 │   │   └── handler.py
 │   ├── explain_query/                  # ⭐ 쿼리 실행 계획 분석 (EXPLAIN)
@@ -134,23 +134,26 @@ db-assistant/
 │   │   └── handler.py
 │   ├── get_cloudwatch_metrics_raw/     # ⭐ CloudWatch 메트릭 수집
 │   │   └── handler.py
+│   │
 │   ├── collect_cpu_intensive_queries/  # CPU 집약 쿼리 수집
 │   │   └── handler.py
 │   ├── collect_temp_space_intensive_queries/  # 임시 공간 집약 쿼리 수집
 │   │   └── handler.py
-│   └── [30개 추가 Lambda 함수들...]
+│   ├── collect_memory_intensive_queries/  # 메모리 집약 쿼리 수집
+│   │   └── handler.py
+│   ├── collect_slow_queries_cloudwatch/  # CloudWatch Slow Query 수집
+│   │   └── handler.py
+│   ├── collect_cluster_metrics/        # 클러스터 메트릭 수집
+│   │   └── handler.py
+│   ├── collect_cluster_events/         # 클러스터 이벤트 수집
+│   │   └── handler.py
+│   │
+│   ├── get_secret/                     # Secret 조회
+│   │   └── handler.py
+│   └── list_secrets/                   # Secret 목록
+│       └── handler.py
 │
-├── modules/                            # 공통 모듈 (8개)
-│   ├── ai_integration.py               # Bedrock 통합 (RAG, Claude)
-│   ├── base.py                         # 베이스 클래스
-│   ├── connection_manager.py           # DB 연결 관리 (사용 중지)
-│   ├── error_analyzer.py               # 에러 분석
-│   ├── interfaces.py                   # 인터페이스 정의
-│   ├── report_generator.py             # HTML 리포트 생성
-│   ├── session_state.py                # 세션 상태
-│   └── shared_types.py                 # 공통 타입
-│
-├── utils/                              # 유틸리티 (4개)
+├── utils/                              # 유틸리티 (4개, 실제 사용)
 │   ├── constants.py                    # 상수 정의 (OUTPUT_DIR, DEFAULT_REGION 등)
 │   ├── formatters.py                   # 포맷터 (bytes, number, percentage 등)
 │   ├── logging_utils.py                # 로깅 유틸리티
@@ -1031,76 +1034,79 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
 ---
 
-## Lambda 함수 목록
+## Lambda 함수 목록 (실제 사용)
 
-### 하이브리드 아키텍처 핵심 함수 (4개)
+> **총 12개** Lambda 함수가 실제로 `db_assistant_mcp_server.py`에서 호출됩니다.
 
-1. **validate_schema** ⭐
+### 하이브리드 아키텍처 핵심 함수 (4개) ⭐
+
+1. **validate_schema**
    - 함수명: `db-assistant-validate-schema-dev`
-   - 역할: DDL 스키마 검증 (CREATE TABLE, ALTER TABLE 등)
+   - 역할: DDL 스키마 검증 (CREATE TABLE, ALTER TABLE, DROP TABLE, CREATE INDEX 등)
+   - 호출 위치: `db_assistant_mcp_server.py:9966`
    - 사용: MCP 서버 → Lambda (DB 연결)
 
-2. **explain_query** ⭐
+2. **explain_query**
    - 함수명: `db-assistant-explain-query-dev`
    - 역할: 쿼리 실행 계획 분석 (EXPLAIN)
+   - 호출 위치: `db_assistant_mcp_server.py:10028`
    - 사용: MCP 서버 → Lambda (DB 연결)
 
-3. **get_rds_cluster_info** ⭐
+3. **get_rds_cluster_info**
    - 함수명: `db-assistant-get-rds-cluster-info-dev`
    - 역할: RDS 클러스터/인스턴스 메타데이터 수집
+   - 호출 위치: `db_assistant_mcp_server.py:8248`
    - 사용: MCP 서버 → Lambda (RDS API)
 
-4. **get_cloudwatch_metrics_raw** ⭐
+4. **get_cloudwatch_metrics_raw**
    - 함수명: `db-assistant-get-cloudwatch-metrics-raw-dev`
    - 역할: CloudWatch 메트릭 수집 (936개 데이터 포인트)
+   - 호출 위치: `db_assistant_mcp_server.py:8279`
    - 사용: MCP 서버 → Lambda (CloudWatch API)
 
-### 성능 분석 (8개)
+### 성능 분석 함수 (6개)
 
-5. **get_cloudwatch_metrics** - CloudWatch 메트릭 수집 (간단 버전)
-6. **get_cluster_info** - 클러스터 정보 조회
-7. **performance_report** - 간단한 성능 리포트 생성
-8. **slow_query_analysis** - 느린 쿼리 분석
-9. **collect_slow_queries_cloudwatch** - CloudWatch Logs에서 Slow Query 수집
-10. **collect_cpu_intensive_queries** - CPU 집약 쿼리 수집
-11. **collect_temp_space_intensive_queries** - 임시 공간 집약 쿼리 수집
-12. **collect_cluster_metrics** - 클러스터 메트릭 수집
+5. **collect_cpu_intensive_queries**
+   - 함수명: `db-assistant-collect-cpu-intensive-queries-dev`
+   - 역할: CPU 집약 쿼리 수집 (CloudWatch Logs Insights)
+   - 호출 위치: `db_assistant_mcp_server.py:9787`
 
-### 데이터베이스 관리 (7개)
+6. **collect_temp_space_intensive_queries**
+   - 함수명: `db-assistant-collect-temp-space-intensive-queries-dev`
+   - 역할: 임시 공간 집약 쿼리 수집 (tmp_table_size, sort_buffer_size)
+   - 호출 위치: `db_assistant_mcp_server.py:9865`
 
-13. **connect_to_database** - 데이터베이스 연결 테스트
-14. **execute_query** - SQL 쿼리 실행
-15. **execute_transaction** - 트랜잭션 실행
-16. **backup_database** - 데이터베이스 백업
-17. **restore_database** - 데이터베이스 복원
-18. **manage_users** - 사용자 관리
-19. **test_db_connection** - DB 연결 테스트
-20. **test_vpc_db_connection** - VPC DB 연결 테스트
+7. **collect_memory_intensive_queries**
+   - 함수명: `db-assistant-collect-memory-intensive-queries-dev`
+   - 역할: 메모리 집약 쿼리 수집 (메모리 사용량 기준)
+   - 호출 위치: `db_assistant_mcp_server.py:9708`
 
-### 스키마 & 최적화 (6개)
+8. **collect_slow_queries_cloudwatch**
+   - 함수명: `db-assistant-collect-slow-queries-cloudwatch-dev`
+   - 역할: CloudWatch Logs에서 Slow Query 수집
+   - 호출 위치: `db_assistant_mcp_server.py:9427`
 
-21. **analyze_schema** - 스키마 구조 분석
-22. **table_statistics** - 테이블 통계 정보
-23. **index_recommendations** - 인덱스 추천
-24. **format_sql** - SQL 쿼리 포맷팅
-25. **validate_sql** - SQL 쿼리 검증
-26. **connection_pool_status** - 커넥션 풀 상태
+9. **collect_cluster_metrics**
+   - 함수명: `db-assistant-collect-cluster-metrics-dev`
+   - 역할: 클러스터 전체 메트릭 수집 (모든 멤버 인스턴스)
+   - 호출 위치: `db_assistant_mcp_server.py:7471`
 
-### 리소스 관리 (6개)
+10. **collect_cluster_events**
+    - 함수명: `db-assistant-collect-cluster-events-dev`
+    - 역할: 클러스터 이벤트 수집 (장애, 유지보수 등)
+    - 호출 위치: `db_assistant_mcp_server.py:7505`
 
-27. **list_rds_instances** - RDS 인스턴스 목록
-28. **list_rds_clusters** - RDS 클러스터 목록
-29. **list_secrets** - Secrets Manager 목록
-30. **get_secret** - Secret 조회
-31. **get_parameter_group** - 파라미터 그룹 정보
-32. **enable_slow_query_log** - Slow Query Log 활성화
+### 리소스 관리 함수 (2개)
 
-### 테스트 & 리포트 (4개)
+11. **get_secret**
+    - 함수명: `db-assistant-get-secret-dev`
+    - 역할: Secrets Manager에서 Secret 조회
+    - 호출 위치: `db_assistant_mcp_server.py:308` (동기 호출: `asyncio.run`)
 
-33. **generate_test_data** - 테스트 데이터 생성
-34. **daily_report** - 일일 성능 리포트
-35. **capacity_planning** - 용량 계획
-36. **collect_cluster_events** - 클러스터 이벤트 수집
+12. **list_secrets**
+    - 함수명: `db-assistant-list-secrets-dev`
+    - 역할: Secrets Manager 목록 조회 (키워드 검색)
+    - 호출 위치: `db_assistant_mcp_server.py:329` (동기 호출: `asyncio.run`)
 
 ---
 
@@ -1109,7 +1115,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 ### 프로젝트 핵심
 
 - **메인 파일**: `db_assistant_mcp_server.py` (500KB, 10000+ lines)
-- **Lambda 함수**: 36개 (핵심 4개: validate_schema, explain_query, get_rds_cluster_info, get_cloudwatch_metrics_raw)
+- **Lambda 함수**: 실제 사용 12개 / 전체 36개
+  - 핵심 4개: validate_schema, explain_query, get_rds_cluster_info, get_cloudwatch_metrics_raw
+  - 성능 분석 6개: CPU/메모리/임시공간 집약 쿼리 수집, Slow Query, 클러스터 메트릭/이벤트
+  - 리소스 관리 2개: get_secret, list_secrets
 - **아키텍처**: 하이브리드 (Lambda 데이터 수집 + EC2 복잡한 분석)
 - **AI 통합**: Bedrock Knowledge Base RAG + Claude Sonnet 4
 
@@ -1122,10 +1131,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
 ### 배포 상태
 
-- **Lambda**: 36개 함수 배포 완료 (ap-northeast-2)
-- **EC2**: MCP 서버 실행 중
+- **Lambda**: 12개 함수 실제 사용 중 / 36개 배포 (ap-northeast-2)
+  - ⭐ 핵심 4개: validate_schema, explain_query, get_rds_cluster_info, get_cloudwatch_metrics_raw
+  - 📊 성능 분석 6개: collect_cpu/memory/temp_space/slow_queries, collect_cluster_metrics/events
+  - 🔑 리소스 관리 2개: get_secret, list_secrets
+- **EC2**: MCP 서버 실행 중 (db_assistant_mcp_server.py)
 - **S3**: 리포트 저장 (`db-assistant-reports`, `db-assistant-query-results-dev`)
-- **Amazon Q CLI**: MCP 프로토콜 연동
+- **Amazon Q CLI**: MCP 프로토콜 연동 완료
 
 ---
 
