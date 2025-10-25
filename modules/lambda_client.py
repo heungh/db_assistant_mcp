@@ -243,58 +243,6 @@ class LambdaClient:
                 'error': str(e)
             }
 
-    async def collect_memory_intensive_queries(
-        self,
-        database_secret: str,
-        db_instance_identifier: str = None,
-        start_time: str = None,
-        end_time: str = None,
-    ) -> dict:
-        """메모리 집약적 쿼리 수집 (Lambda 사용)
-
-        Args:
-            database_secret: Secrets Manager secret name
-            db_instance_identifier: DB 인스턴스 식별자
-            start_time: 시작 시간
-            end_time: 종료 시간
-
-        Returns:
-            dict: {
-                'success': bool,
-                'queries': list,
-                'error': str (실패 시)
-            }
-        """
-        try:
-            logger.info(f"Lambda로 메모리 집약 쿼리 수집: {database_secret}")
-
-            # Lambda 호출
-            lambda_result = await self._call_lambda('collect-memory-intensive-queries', {
-                'database_secret': database_secret,
-                'db_instance_identifier': db_instance_identifier,
-                'start_time': start_time,
-                'end_time': end_time,
-                'region': self.region
-            })
-
-            if not lambda_result.get('success'):
-                error_msg = lambda_result.get('error', 'Lambda 호출 실패')
-                logger.error(f"메모리 집약적 쿼리 수집 실패: {error_msg}")
-                return {
-                    'success': False,
-                    'error': error_msg
-                }
-
-            logger.info(f"메모리 집약적 쿼리 {len(lambda_result.get('queries', []))}개 수집 완료")
-            return lambda_result
-
-        except Exception as e:
-            logger.error(f"메모리 집약 쿼리 수집 실패: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
     async def collect_cpu_intensive_queries(
         self,
         database_secret: str,
