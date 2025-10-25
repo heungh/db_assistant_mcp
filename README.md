@@ -63,17 +63,16 @@
 - `modules/sql_parser.py` - SQL 파싱 및 타입 분석
 - `utils/` - 공통 유틸리티 (상수, 파서, 포맷터, 로깅)
 
-### 3. 실제 사용 Lambda 함수 12개
+### 3. 실제 사용 Lambda 함수 11개
 #### 핵심 4개 (하이브리드 아키텍처)
 - `validate_schema` - DDL 스키마 검증
 - `explain_query` - DML EXPLAIN 분석
 - `get_rds_cluster_info` - RDS 메타데이터 수집
 - `get_cloudwatch_metrics_raw` - CloudWatch 메트릭 수집 (936개 데이터 포인트)
 
-#### 성능 분석 6개
+#### 성능 분석 5개
 - `collect_cpu_intensive_queries` - CPU 집약 쿼리
 - `collect_temp_space_intensive_queries` - 임시 공간 집약 쿼리
-- `collect_memory_intensive_queries` - 메모리 집약 쿼리
 - `collect_slow_queries_cloudwatch` - CloudWatch Slow Query
 - `collect_cluster_metrics` - 클러스터 메트릭
 - `collect_cluster_events` - 클러스터 이벤트
@@ -242,8 +241,6 @@ db-assistant/
 │   ├── collect_cpu_intensive_queries/  # CPU 집약 쿼리 수집
 │   │   └── handler.py
 │   ├── collect_temp_space_intensive_queries/  # 임시 공간 집약 쿼리 수집
-│   │   └── handler.py
-│   ├── collect_memory_intensive_queries/  # 메모리 집약 쿼리 수집 (미사용)
 │   │   └── handler.py
 │   ├── collect_slow_queries_cloudwatch/  # CloudWatch Slow Query 수집
 │   │   └── handler.py
