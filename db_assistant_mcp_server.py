@@ -2886,7 +2886,6 @@ Knowledge Base 참고 정보:
         correlation_analysis: str,
         outliers_analysis: str,
         slow_queries: str,
-        memory_queries: str,
         cpu_queries: str,
         temp_queries: str,
         database_secret: str = None,
@@ -2925,9 +2924,6 @@ Knowledge Base 성능 최적화 가이드:
 
 **느린 쿼리 분석:**
 {slow_queries}
-
-**메모리 집약적 쿼리:**
-{memory_queries}
 
 **CPU 집약적 쿼리:**
 {cpu_queries}
@@ -4855,9 +4851,6 @@ Knowledge Base 성능 최적화 가이드:
             generated_files = []  # 생성된 파일들 추적
 
             slow_queries = await self.collect_slow_queries(database_secret)
-            memory_queries = await self.collect_memory_intensive_queries(
-                database_secret, db_instance_identifier, None, None
-            )
             cpu_queries = await self.collect_cpu_intensive_queries(
                 database_secret, db_instance_identifier, None, None
             )
@@ -4867,7 +4860,6 @@ Knowledge Base 성능 최적화 가이드:
 
             # URL을 HTML 링크로 변환
             slow_queries = self.convert_urls_to_html_links(slow_queries)
-            memory_queries = self.convert_urls_to_html_links(memory_queries)
             cpu_queries = self.convert_urls_to_html_links(cpu_queries)
             temp_queries = self.convert_urls_to_html_links(temp_queries)
 
@@ -4949,7 +4941,6 @@ Knowledge Base 성능 최적화 가이드:
                         correlation_analysis,
                         outliers,
                         slow_queries,
-                        memory_queries,
                         cpu_queries,
                         temp_queries,
                         database_secret,
@@ -5174,9 +5165,6 @@ Knowledge Base 성능 최적화 가이드:
         <div class="section" id="resource-intensive">
             <div class="section-header">💾 6. 리소스 소모가 큰 쿼리 분석</div>
             <div class="section-content">
-                <h4>🧠 메모리 소비가 많은 쿼리</h4>
-                <div class="query-box">{memory_queries}</div>
-                
                 <h4>⚡ CPU 소비가 많은 쿼리</h4>
                 <div class="query-box">{cpu_queries}</div>
                 
@@ -5186,7 +5174,6 @@ Knowledge Base 성능 최적화 가이드:
                 <div class="recommendation">
                     <strong>💡 리소스 최적화 전략:</strong>
                     <ul style="margin-top: 10px; margin-left: 20px;">
-                        <li><strong>메모리:</strong> 정렬 버퍼 크기 조정, 임시 테이블 사용 최소화</li>
                         <li><strong>CPU:</strong> 복잡한 연산 최적화, 함수 사용 최소화</li>
                         <li><strong>임시 공간:</strong> GROUP BY, ORDER BY 최적화, 인덱스 활용</li>
                     </ul>
@@ -7462,79 +7449,6 @@ Knowledge Base 성능 최적화 가이드:
         except Exception as e:
             return f"❌ SlowQuery 로그 활성화 실패: {str(e)}"
 
-    async def collect_memory_intensive_queries(
-        self,
-        database_secret: str,
-        db_instance_identifier: str = None,
-        start_time: str = None,
-        end_time: str = None,
-    ) -> str:
-        """메모리 집약적 쿼리 수집 및 SQL 파일 생성 (Lambda 사용)"""
-        try:
-            # 리팩토링: Week 1 - LambdaClient 모듈로 위임
-            lambda_result = await self.lambda_client.collect_memory_intensive_queries(
-                database_secret, db_instance_identifier, start_time, end_time
-            )
-
-            if not lambda_result.get('success'):
-                error_msg = lambda_result.get('error', 'Lambda 호출 실패')
-                return f"❌ 메모리 집약적 쿼리 수집 실패: {error_msg}"
-
-            # Lambda에서 받은 쿼리 데이터로 파일 생성 (로컬 처리)
-            queries = lambda_result.get('queries', [])
-
-            if queries:
-                # 현재 날짜와 인스턴스 ID로 파일명 생성
-                current_date = datetime.now().strftime("%Y%m%d")
-                instance_suffix = (
-                    f"_{db_instance_identifier}" if db_instance_identifier else ""
-                )
-                filename = f"memory_intensive_queries{instance_suffix}_{current_date}.sql"
-                file_path = SQL_DIR / filename
-
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(f"-- 메모리 집약적 쿼리 모음 (수집일시: {datetime.now()})\n")
-                    f.write(f"-- 총 {len(queries)}개의 쿼리\n\n")
-
-                    for i, query_info in enumerate(queries, 1):
-                        sql = query_info.get('sql', '')
-                        source = query_info.get('source', 'unknown')
-                        max_memory = query_info.get('max_memory_used', 0)
-                        exec_count = query_info.get('exec_count', 0)
-
-                        f.write(f"-- 메모리 집약적 쿼리 #{i} (출처: {source})\n")
-                        if max_memory:
-                            memory_mb = max_memory / (1024 * 1024)
-                            f.write(f"-- 최대 메모리: {memory_mb:.2f}MB, 실행 횟수: {exec_count}\n")
-                        f.write(f"{sql};\n\n")
-
-                # S3에 업로드 및 Pre-signed URL 생성
-                try:
-                    import boto3
-                    s3_client = boto3.client('s3', region_name=self.default_region)
-                    s3_bucket = "db-assistant-query-results-dev"
-                    s3_key = f"sql-files/memory-intensive/{filename}"
-
-                    s3_client.upload_file(str(file_path), s3_bucket, s3_key)
-                    logger.info(f"SQL 파일 S3 업로드 완료: s3://{s3_bucket}/{s3_key}")
-
-                    presigned_url = s3_client.generate_presigned_url(
-                        'get_object',
-                        Params={'Bucket': s3_bucket, 'Key': s3_key},
-                        ExpiresIn=604800
-                    )
-
-                    return f"✅ 메모리 집약적 쿼리 {len(queries)}개 수집 완료: {filename}\n🔗 다운로드 (7일 유효): {presigned_url}"
-                except Exception as s3_error:
-                    logger.error(f"S3 업로드 실패: {s3_error}")
-                    return f"✅ 메모리 집약적 쿼리 {len(queries)}개 수집 완료: {self.format_file_link(str(file_path), filename)}"
-            else:
-                return f"✅ 메모리 집약적 쿼리가 발견되지 않았습니다"
-
-        except Exception as e:
-            logger.error(f"메모리 집약 쿼리 수집 실패: {str(e)}")
-            return f"❌ 메모리 집약적 쿼리 수집 실패: {str(e)}"
-
     async def collect_cpu_intensive_queries(
         self,
         database_secret: str,
@@ -9329,32 +9243,6 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="collect_memory_intensive_queries",
-            description="메모리 집약적 쿼리를 수집하는 SQL을 생성합니다",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "database_secret": {
-                        "type": "string",
-                        "description": "데이터베이스 시크릿 이름",
-                    },
-                    "db_instance_identifier": {
-                        "type": "string",
-                        "description": "특정 인스턴스 식별자 (선택사항)",
-                    },
-                    "start_time": {
-                        "type": "string",
-                        "description": "시작 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
-                    },
-                    "end_time": {
-                        "type": "string",
-                        "description": "종료 시간 (YYYY-MM-DD HH:MM:SS 형식, 선택사항)",
-                    },
-                },
-                "required": ["database_secret"],
-            },
-        ),
-        types.Tool(
             name="collect_cpu_intensive_queries",
             description="CPU 집약적 쿼리를 수집하는 SQL을 생성합니다",
             inputSchema={
@@ -9777,13 +9665,6 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         elif name == "enable_slow_query_log_exports":
             result = await db_assistant.enable_slow_query_log_exports(
                 arguments["cluster_identifier"]
-            )
-        elif name == "collect_memory_intensive_queries":
-            result = await db_assistant.collect_memory_intensive_queries(
-                arguments["database_secret"],
-                arguments.get("db_instance_identifier"),
-                arguments.get("start_time"),
-                arguments.get("end_time"),
             )
         elif name == "collect_cpu_intensive_queries":
             result = await db_assistant.collect_cpu_intensive_queries(
