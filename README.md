@@ -219,16 +219,16 @@ db-assistant/
 ├── README.md                           # 이 파일
 ├── requirements.txt                    # Python 의존성
 │
-├── db_assistant_mcp_server.py          # 🎯 MCP 메인 서버 (9,888줄, Week 4 완료 후)
+├── db_assistant_mcp_server.py          # 🎯 MCP 메인 서버 
 │
-├── modules/                            # 모듈화된 컴포넌트 (Week 1~4 리팩토링)
+├── modules/                            # 모듈화된 컴포넌트 
 │   ├── __init__.py                     # 모듈 초기화
-│   ├── lambda_client.py                # Week 1: Lambda 함수 호출 관리 (374줄)
-│   ├── cloudwatch_manager.py           # Week 2: CloudWatch 메트릭 수집/분석 (261줄)
-│   ├── report_generator.py             # Week 3: HTML/CSV 리포트 생성 (678줄)
-│   └── sql_parser.py                   # Week 4: SQL 파싱 및 타입 분석 (450줄)
+│   ├── lambda_client.py                # Week 1: Lambda 함수 호출 관리 
+│   ├── cloudwatch_manager.py           # Week 2: CloudWatch 메트릭 수집/분석 
+│   ├── report_generator.py             # Week 3: HTML/CSV 리포트 생성 
+│   └── sql_parser.py                   # Week 4: SQL 파싱 및 타입 분석 
 │
-├── lambda-functions/                   # Lambda 함수들 (실제 사용: 12개)
+├── lambda-functions/                   # Lambda 함수들 (실제 사용: 12개) : 각 폴더밑에 파일명은 handler.py
 │   │
 │   ├── validate_schema/                # ⭐ DDL 스키마 검증
 │   │   └── handler.py
@@ -268,19 +268,16 @@ db-assistant/
 │   ├── cluster_performance_report_*.html
 │   └── validation_report_*.html
 │
-├── data/                               # CSV 데이터 파일
+├── data/                               # Cloudwatch metric CSV 데이터 파일
 │   └── database_metrics_*.csv
 │
-├── sql/                                # SQL 쿼리 파일
-│   ├── cpu_intensive_queries_*.sql
-│   └── temp_space_intensive_queries_*.sql
+├── sql/                                # 검증할 SQL 쿼리 파일
+│   ├── create_table_*.sql
+│   └── select_*.sql
 │
-├── logs/                               # 로그 파일
-│   └── mcp_server_*.log
-│
-└── scripts/                            # 배포 스크립트
-    ├── backup_before_refactoring.sh    # 백업 스크립트
-    └── deploy_to_ec2.sh                # EC2 배포 스크립트
+└── logs/                               # 디버깅 로그 파일
+    └── mcp_server_*.log
+
 ```
 
 ---
