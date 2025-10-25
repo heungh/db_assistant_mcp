@@ -298,15 +298,14 @@ class DBAssistantMCPServer:
 
         return f"✅ 기본 리전이 변경되었습니다!\n\n이전: {old_region}\n현재: {self.default_region}\n\n💡 이제 모든 AWS 서비스 호출과 시간 변환이 새 리전 기준으로 작동합니다."
 
-    def get_secret(self, secret_name):
+    async def get_secret(self, secret_name):
         """Secrets Manager에서 DB 연결 정보 가져오기 (Lambda 사용)"""
         try:
             # Lambda 함수 호출
-            import asyncio
-            result = asyncio.run(self._call_lambda('get-secret', {
+            result = await self._call_lambda('get-secret', {
                 'secret_name': secret_name,
                 'region': 'ap-northeast-2'
-            }))
+            })
 
             if result.get('success'):
                 return result['secret']
@@ -2207,7 +2206,7 @@ SQL 쿼리:"""
                 if "오류:" in claude_result or "존재하지 않" in claude_result:
                     issues.append(f"Claude 검증: {claude_result}")
                     debug_log("Claude 검증에서 오류 발견")
-                elif claude_result.startswith("검증 통과"):
+                elif "검증 통과" in claude_result:
                     debug_log("Claude 검증 통과")
                 else:
                     debug_log("Claude 검증 완료")
@@ -4674,10 +4673,10 @@ Knowledge Base 성능 최적화 가이드:
                 metrics["memory_usage_min"] = 0.0
                 metrics["memory_usage_max"] = 0.0
 
-            print(f"DEBUG: Extracted metrics from CSV: {metrics}")
+            print(f"DEBUG: Extracted metrics from CSV: {metrics}", file=sys.stderr)
 
         except Exception as e:
-            print(f"Error reading CSV file {csv_filename}: {e}")
+            print(f"Error reading CSV file {csv_filename}: {e}", file=sys.stderr)
             # 기본값 설정
             for key in [
                 "cpu_mean",
@@ -4738,7 +4737,7 @@ Knowledge Base 성능 최적화 가이드:
                             (total_memory - freeable_memory_mean) / total_memory * 100
                         )
                     except (ValueError, IndexError) as e:
-                        print(f"Error parsing mean line: {e}")
+                        print(f"Error parsing mean line: {e}", file=sys.stderr)
 
             # min 라인 처리
             elif line.strip().startswith("min") and "CPUUtilization" in summary_text:
@@ -4760,7 +4759,7 @@ Knowledge Base 성능 최적화 가이드:
                             (total_memory - freeable_memory_max) / total_memory * 100
                         )
                     except (ValueError, IndexError) as e:
-                        print(f"Error parsing min line: {e}")
+                        print(f"Error parsing min line: {e}", file=sys.stderr)
 
             # max 라인 처리
             elif line.strip().startswith("max") and "CPUUtilization" in summary_text:
@@ -4782,7 +4781,7 @@ Knowledge Base 성능 최적화 가이드:
                             (total_memory - freeable_memory_min) / total_memory * 100
                         )
                     except (ValueError, IndexError) as e:
-                        print(f"Error parsing max line: {e}")
+                        print(f"Error parsing max line: {e}", file=sys.stderr)
 
         return metrics
 
@@ -6906,10 +6905,10 @@ Knowledge Base 성능 최적화 가이드:
             start_time_ms = int(start_dt.timestamp() * 1000)
             end_time_ms = int(end_dt.timestamp() * 1000)
 
-            print(f"DEBUG: 클러스터 ID: {cluster_identifier}")
-            print(f"DEBUG: 로그 그룹: {log_group_name}")
-            print(f"DEBUG: 시간 범위: {start_dt} ~ {end_dt} (UTC)")
-            print(f"DEBUG: 타임스탬프: {start_time_ms} ~ {end_time_ms}")
+            print(f"DEBUG: 클러스터 ID: {cluster_identifier}", file=sys.stderr)
+            print(f"DEBUG: 로그 그룹: {log_group_name}", file=sys.stderr)
+            print(f"DEBUG: 시간 범위: {start_dt} ~ {end_dt} (UTC)", file=sys.stderr)
+            print(f"DEBUG: 타임스탬프: {start_time_ms} ~ {end_time_ms}", file=sys.stderr)
 
             response = logs_client.filter_log_events(
                 logGroupName=log_group_name,
@@ -6918,25 +6917,25 @@ Knowledge Base 성능 최적화 가이드:
             )
 
             events_count = len(response.get("events", []))
-            print(f"DEBUG: 검색된 이벤트 수: {events_count}")
+            print(f"DEBUG: 검색된 이벤트 수: {events_count}", file=sys.stderr)
 
             if events_count > 0:
                 # 첫 번째 이벤트 확인
                 first_event = response["events"][0]
-                print(f"DEBUG: 첫 번째 이벤트 타임스탬프: {first_event['timestamp']}")
+                print(f"DEBUG: 첫 번째 이벤트 타임스탬프: {first_event['timestamp']}", file=sys.stderr)
                 print(
-                    f"DEBUG: 첫 번째 이벤트 메시지 미리보기: {first_event['message'][:100]}..."
+                    f"DEBUG: 첫 번째 이벤트 메시지 미리보기: {first_event['message'][:100]}...", file=sys.stderr
                 )
 
                 # 파싱 테스트
                 message = first_event["message"].replace("\\n", "\n")
-                print(f"DEBUG: Query_time 패턴 존재? {'# Query_time: ' in message}")
+                print(f"DEBUG: Query_time 패턴 존재? {'# Query_time: ' in message}", file=sys.stderr)
 
                 if "# Query_time: " in message:
                     lines = message.split("\n")
-                    print(f"DEBUG: 분할된 라인 수: {len(lines)}")
+                    print(f"DEBUG: 분할된 라인 수: {len(lines)}", file=sys.stderr)
                     for i, line in enumerate(lines[:5]):  # 처음 5줄만
-                        print(f"DEBUG: Line {i}: {repr(line)}")
+                        print(f"DEBUG: Line {i}: {repr(line)}", file=sys.stderr)
 
             return f"✅ 디버그 완료: {events_count}개 이벤트 발견"
 
@@ -7741,7 +7740,7 @@ Knowledge Base 성능 최적화 가이드:
             for secret_name in secret_lists:
                 try:
                     # 시크릿에서 DB 정보 가져오기
-                    secret_data = self.get_secret(secret_name)
+                    secret_data = await self.get_secret(secret_name)
                     db_host = secret_data.get("host", "")
                     
                     # 호스트명에서 인스턴스/클러스터 식별자 추출
