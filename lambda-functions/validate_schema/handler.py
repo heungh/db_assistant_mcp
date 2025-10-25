@@ -14,7 +14,7 @@ import pymysql
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-S3_BUCKET = 'db-assistant-query-results-dev'
+S3_BUCKET = 'db-assistant-query-results'
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
