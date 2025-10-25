@@ -5,15 +5,17 @@
 """
 
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Callable
 
-# 로깅 설정
+# 로깅 설정 - MCP 서버에서는 반드시 stderr로 로그를 출력해야 함
+# stdout은 MCP 프로토콜(JSON-RPC)용으로 예약되어 있음
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()],
+    handlers=[logging.StreamHandler(sys.stderr)],  # stderr로 변경
 )
 
 # 로거 인스턴스
@@ -59,8 +61,8 @@ def create_session_log(operation_name: str = "operation", logs_dir: Path = None)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(log_entry)
 
-        # 콘솔에도 출력
-        print(f"[{level}] {message}")
+        # 콘솔에도 출력 (MCP 서버에서는 stderr로 출력해야 함)
+        print(f"[{level}] {message}", file=sys.stderr)
 
     # 초기 로그 작성
     log_message("INFO", f"새 작업 세션 시작: {operation_name} - 로그 파일: {log_path}")
