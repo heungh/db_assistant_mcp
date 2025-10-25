@@ -89,6 +89,12 @@ from utils.formatters import (
     format_metric_value,
 )
 
+# 모듈 import (리팩토링)
+from modules.lambda_client import LambdaClient  # Week 1
+from modules.cloudwatch_manager import CloudWatchManager  # Week 2
+from modules.report_generator import ReportGenerator  # Week 3
+from modules.sql_parser import SQLParser  # Week 4 Phase 2
+
 # 로깅 설정 및 전역 변수는 utils 모듈에서 import됨
 # create_session_log, debug_log 함수는 utils/logging_utils.py에서 제공
 # 디렉토리 경로 상수들은 utils/constants.py에서 제공
@@ -148,10 +154,27 @@ class DBAssistantMCPServer:
         )
 
         # Lambda 클라이언트 초기화 (하이브리드 아키텍처용)
-        self.lambda_client = boto3.client(
-            "lambda", region_name=self.default_region, verify=False
-        )
+        # 리팩토링: Week 1 - LambdaClient 모듈 사용
+        self.lambda_client = LambdaClient(region=self.default_region)
         logger.info(f"Lambda 클라이언트 초기화 완료 - 리전: {self.default_region}")
+
+        # CloudWatch Manager 초기화
+        # 리팩토링: Week 2 - CloudWatchManager 모듈 사용
+        self.cloudwatch_manager = CloudWatchManager(
+            region=self.default_region,
+            lambda_client=self.lambda_client
+        )
+        logger.info(f"CloudWatch Manager 초기화 완료 - 리전: {self.default_region}")
+
+        # Report Generator 초기화
+        # 리팩토링: Week 3 - ReportGenerator 모듈 사용
+        self.report_generator = ReportGenerator()
+        logger.info("Report Generator 초기화 완료")
+
+        # SQL Parser 초기화
+        # 리팩토링: Week 4 Phase 2 - SQLParser 모듈 사용
+        self.sql_parser = SQLParser()
+        logger.info("SQL Parser 초기화 완료")
 
     def get_default_region(self) -> str:
         """현재 AWS 프로파일의 기본 리전 가져오기"""
@@ -165,51 +188,10 @@ class DBAssistantMCPServer:
         """
         Lambda 함수 호출 헬퍼 (하이브리드 아키텍처용)
 
-        RDS/CloudWatch API 호출을 Lambda로 오프로드하여
-        원본 서버는 복잡한 분석 로직에만 집중
+        리팩토링: Week 1 - LambdaClient 모듈로 위임
+        하위 호환성을 위해 메서드 유지
         """
-        try:
-            full_name = f"db-assistant-{function_name}-dev"
-            logger.info(f"Lambda 호출: {full_name}")
-
-            response = self.lambda_client.invoke(
-                FunctionName=full_name,
-                InvocationType='RequestResponse',
-                Payload=json.dumps(payload)
-            )
-
-            result = json.loads(response['Payload'].read())
-
-            # 상세 로깅: result 타입 확인
-            logger.debug(f"Lambda result 타입: {type(result)}")
-            logger.debug(f"Lambda result 내용: {str(result)[:500]}")
-
-            if response['StatusCode'] == 200 and result.get('statusCode') == 200:
-                body = result.get('body', '{}')
-                logger.debug(f"Lambda body 타입 (파싱 전): {type(body)}")
-
-                if isinstance(body, str):
-                    body = json.loads(body)
-                    logger.debug(f"Lambda body 타입 (파싱 후): {type(body)}")
-
-                # body가 딕셔너리가 아닌 경우 처리
-                if not isinstance(body, dict):
-                    logger.error(f"Lambda body가 딕셔너리가 아님: {type(body)}, 내용: {str(body)[:200]}")
-                    return {
-                        'success': False,
-                        'error': f'Lambda 응답 형식 오류: body가 {type(body).__name__} 타입입니다'
-                    }
-
-                logger.info(f"Lambda 호출 성공: {full_name}")
-                return body
-            else:
-                error_msg = result.get('body', {}).get('error', 'Unknown error')
-                logger.error(f"Lambda 오류: {error_msg}")
-                raise Exception(f"Lambda 오류: {error_msg}")
-
-        except Exception as e:
-            logger.error(f"Lambda 호출 실패 ({function_name}): {str(e)}")
-            raise
+        return await self.lambda_client._call_lambda(function_name, payload)
 
     def parse_table_name(self, full_table_name: str) -> tuple:
         """테이블명에서 스키마와 테이블명을 분리 (utils/parsers.py 위임)"""
@@ -337,15 +319,14 @@ class DBAssistantMCPServer:
             logger.error(f"Secret 조회 실패: {e}")
             raise e
 
-    def get_secrets_by_keyword(self, keyword=""):
+    async def get_secrets_by_keyword(self, keyword=""):
         """키워드로 Secret 목록 가져오기 (Lambda 사용)"""
         try:
             # Lambda 함수 호출
-            import asyncio
-            result = asyncio.run(self._call_lambda('list-secrets', {
+            result = await self._call_lambda('list-secrets', {
                 'keyword': keyword,
                 'region': 'ap-northeast-2'
-            }))
+            })
 
             if result.get('success'):
                 return result.get('secrets', [])
@@ -384,38 +365,7 @@ class DBAssistantMCPServer:
 
         return successful_tables
 
-    def validate_dml_columns_with_context(
-        self, sql_content: str, cursor, debug_log, available_tables: List[str]
-    ):
-        """컨텍스트를 고려한 DML 컬럼 검증"""
-        # 기존 validate_dml_columns 로직을 사용하되, available_tables를 고려
-        # 이 함수는 기존 함수를 확장한 버전입니다
-        return self.validate_dml_columns(sql_content, cursor, debug_log)
 
-    def parse_ddl_statements(self, sql_content: str) -> List[Dict[str, Any]]:
-        """DDL 구문을 파싱하여 개별 구문으로 분리"""
-        statements = []
-
-        # CREATE TABLE 파싱
-        create_table_pattern = (
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?\s*\("
-        )
-        for match in re.finditer(create_table_pattern, sql_content, re.IGNORECASE):
-            statements.append({"type": "CREATE_TABLE", "table": match.group(1)})
-
-        # CREATE INDEX 파싱
-        create_index_pattern = r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+`?(\w+)`?\s+ON\s+`?(\w+)`?\s*\(\s*`?(\w+)`?"
-        for match in re.finditer(create_index_pattern, sql_content, re.IGNORECASE):
-            statements.append(
-                {
-                    "type": "CREATE_INDEX",
-                    "index_name": match.group(1),
-                    "table": match.group(2),
-                    "columns": match.group(3),
-                }
-            )
-
-        return statements
 
     async def execute_explain_with_cursor(self, sql_content: str, cursor, debug_log):
         """EXPLAIN 실행 (커서 사용)"""
@@ -596,126 +546,8 @@ class DBAssistantMCPServer:
             logger.error(f"검증 중 오류: {e}")
             return f"❌ 검증 중 오류: {str(e)}"
 
-    async def validate_schema_with_cursor(self, ddl_content: str, cursor):
-        """스키마 검증 (커서 사용) - 다중 CREATE 구문 고려"""
-        result = {"valid": True, "issues": []}
 
-        try:
-            if cursor is None:
-                result["valid"] = False
-                result["issues"].append("데이터베이스 커서가 없습니다.")
-                return result
 
-            # 현재 SQL에서 생성되는 테이블들 추출
-            created_tables = self.extract_created_tables(ddl_content)
-
-            # DDL 타입에 따른 검증
-            ddl_type = self.extract_ddl_type(ddl_content)
-
-            if ddl_type == "CREATE_TABLE":
-                # 각 CREATE TABLE 구문에 대해 검증
-                for table_name in created_tables:
-                    cursor.execute("SHOW TABLES LIKE %s", (table_name,))
-                    if cursor.fetchone():
-                        result["valid"] = False
-                        result["issues"].append(
-                            f"테이블 '{table_name}'이 이미 존재합니다."
-                        )
-
-            elif ddl_type == "ALTER_TABLE":
-                # 테이블 변경 검증
-                table_name = self.extract_table_name_from_alter(ddl_content)
-                if table_name:
-                    cursor.execute("SHOW TABLES LIKE %s", (table_name,))
-                    if not cursor.fetchone():
-                        result["valid"] = False
-                        result["issues"].append(
-                            f"테이블 '{table_name}'이 존재하지 않습니다."
-                        )
-
-            return result
-
-        except Exception as e:
-            result["valid"] = False
-            result["issues"].append(f"스키마 검증 오류: {str(e)}")
-            return result
-
-    async def validate_constraints_with_cursor(self, ddl_content: str, cursor):
-        """제약조건 검증 (커서 사용)"""
-        result = {"valid": True, "issues": []}
-
-        try:
-            if cursor is None:
-                result["valid"] = False
-                result["issues"].append("데이터베이스 커서가 없습니다.")
-                return result
-
-            # 외래키 검증
-            foreign_keys = self.extract_foreign_keys(ddl_content)
-            for fk in foreign_keys:
-                ref_table = fk.get("referenced_table")
-                if ref_table:
-                    cursor.execute("SHOW TABLES LIKE %s", (ref_table,))
-                    if not cursor.fetchone():
-                        result["valid"] = False
-                        result["issues"].append(
-                            f"참조 테이블 '{ref_table}'이 존재하지 않습니다."
-                        )
-
-            return result
-
-        except Exception as e:
-            result["valid"] = False
-            result["issues"].append(f"제약조건 검증 오류: {str(e)}")
-            return result
-
-    async def validate_table_existence(self, sql_content: str, connection, debug_log):
-        """테이블 존재성 검증"""
-        result = {"issues": [], "tables_checked": []}
-
-        try:
-            if connection is None:
-                debug_log("데이터베이스 연결이 None입니다")
-                result["issues"].append("데이터베이스 연결이 없습니다.")
-                return result
-
-            cursor = connection.cursor()
-            if cursor is None:
-                debug_log("커서 생성 실패")
-                result["issues"].append("데이터베이스 커서 생성 실패")
-                return result
-
-            # SQL에서 테이블명 추출
-            tables = self.extract_table_names(sql_content)
-            debug_log(f"추출된 테이블명: {tables}")
-
-            for table in tables:
-                result["tables_checked"].append(table)
-
-                try:
-                    # 테이블 존재 여부 확인
-                    cursor.execute("SHOW TABLES LIKE %s", (table,))
-                    exists = cursor.fetchone()
-
-                    if not exists:
-                        issue = f"테이블 '{table}'이 존재하지 않습니다."
-                        result["issues"].append(issue)
-                        debug_log(f"테이블 존재성 검증 실패: {table}")
-                    else:
-                        debug_log(f"테이블 존재성 검증 통과: {table}")
-                except Exception as table_check_error:
-                    debug_log(f"테이블 {table} 검증 중 오류: {table_check_error}")
-                    result["issues"].append(
-                        f"테이블 '{table}' 검증 오류: {str(table_check_error)}"
-                    )
-
-            cursor.close()
-
-        except Exception as e:
-            debug_log(f"테이블 존재성 검증 오류: {e}")
-            result["issues"].append(f"테이블 존재성 검증 오류: {str(e)}")
-
-        return result
 
     def extract_table_name_from_alter(self, ddl_content: str) -> str:
         """ALTER TABLE 구문에서 테이블명 추출"""
@@ -1163,7 +995,7 @@ class DBAssistantMCPServer:
     async def list_database_secrets(self, keyword: str = "") -> str:
         """데이터베이스 시크릿 목록 조회"""
         try:
-            secrets = self.get_secrets_by_keyword(keyword)
+            secrets = await self.get_secrets_by_keyword(keyword)
             if not secrets:
                 return (
                     f"'{keyword}' 키워드로 찾은 시크릿이 없습니다."
@@ -2147,7 +1979,7 @@ SQL 쿼리:"""
                 debug_log("세미콜론 검증 통과")
 
             # 2. SQL 타입 확인
-            sql_type = self.extract_ddl_type(ddl_content, debug_log)
+            sql_type = self.sql_parser.extract_ddl_type(ddl_content, debug_log)
             debug_log(f"SQL 타입: {sql_type}")
 
             # 3. SQL 타입에 따른 검증 분기
@@ -2239,6 +2071,21 @@ SQL 쿼리:"""
                         # DML 검증 (Lambda EXPLAIN 사용)
                         debug_log("=== Lambda EXPLAIN 검증 시작 ===")
 
+                        # 파일 내 생성된 테이블 목록 추출 (임시 스키마 시뮬레이션)
+                        created_tables = set()
+                        skipped_queries = []  # 스킵된 쿼리 정보 (Claude 분석용)
+
+                        try:
+                            ddl_statements = self.sql_parser.parse_ddl_detailed(ddl_content)
+                            for stmt in ddl_statements:
+                                if stmt.get('type') == 'CREATE_TABLE':
+                                    table_name = stmt.get('table', '').lower()
+                                    if table_name:
+                                        created_tables.add(table_name)
+                            debug_log(f"파일 내 생성된 테이블 목록: {created_tables}")
+                        except Exception as parse_error:
+                            debug_log(f"DDL 파싱 오류 (무시하고 계속): {parse_error}")
+
                         # SQL을 개별 쿼리로 분리
                         if sqlparse:
                             statements = sqlparse.split(ddl_content)
@@ -2265,6 +2112,26 @@ SQL 쿼리:"""
                             dml_pattern = re.match(r"^\s*(SELECT|UPDATE|DELETE|INSERT|REPLACE)", cleaned_stmt, re.IGNORECASE)
                             if not dml_pattern:
                                 debug_log(f"쿼리 {i+1}: DML 쿼리가 아니므로 EXPLAIN 스킵")
+                                continue
+
+                            # 파일 내 생성된 테이블을 참조하는지 확인
+                            references_new_table = False
+                            referenced_tables = []
+                            for table in created_tables:
+                                # FROM, JOIN, INTO 절에서 테이블 참조 확인
+                                if re.search(rf'\b(FROM|JOIN|INTO)\s+`?{table}`?\b', cleaned_stmt, re.IGNORECASE):
+                                    references_new_table = True
+                                    referenced_tables.append(table)
+
+                            # 새 테이블 참조 시 EXPLAIN 스킵
+                            if references_new_table:
+                                debug_log(f"쿼리 {i+1}: 파일 내 생성된 테이블 참조 ({', '.join(referenced_tables)}) - EXPLAIN 스킵")
+                                # 스킵된 쿼리 정보 기록 (Claude 분석용)
+                                skipped_queries.append({
+                                    'query_num': i+1,
+                                    'query': cleaned_stmt[:100] + ('...' if len(cleaned_stmt) > 100 else ''),
+                                    'tables': referenced_tables
+                                })
                                 continue
 
                             debug_log(f"쿼리 {i+1}: Lambda EXPLAIN 실행 중...")
@@ -2317,6 +2184,10 @@ SQL 쿼리:"""
                 )
                 debug_log(f"스키마 검증 요약 생성: {schema_validation_summary}")
 
+                # 스킵된 쿼리 정보 확인 (DML 검증에서 정의되었을 경우)
+                skipped_info = locals().get('skipped_queries', [])
+                debug_log(f"스킵된 쿼리 개수: {len(skipped_info)}")
+
                 # Claude 검증 (스키마 정보는 Lambda에서 이미 확인했으므로 불필요)
                 claude_result = await self.validate_with_claude(
                     ddl_content,
@@ -2325,6 +2196,7 @@ SQL 쿼리:"""
                     None,  # explain_info_str 제거
                     sql_type,
                     schema_validation_summary,
+                    skipped_queries=skipped_info,  # 스킵된 쿼리 정보 전달
                 )
                 debug_log(f"Claude 검증 결과: {claude_result}")
 
@@ -2523,157 +2395,6 @@ SQL 쿼리:"""
         # 여러 문장이 있는 경우 마지막을 제외하고는 모두 세미콜론이 있어야 함
         return content.endswith(";")
 
-    def extract_ddl_type(self, ddl_content: str, debug_log=None) -> str:
-        """혼합 SQL 파일 타입 추출 - SELECT 쿼리가 많으면 MIXED_SELECT로 분류"""
-        import re
-
-        # 주석과 빈 줄을 제거하고 실제 구문만 추출
-        # 먼저 /* */ 스타일 주석을 전체적으로 제거
-        ddl_content = re.sub(r"/\*.*?\*/", "", ddl_content, flags=re.DOTALL)
-
-        lines = ddl_content.strip().split("\n")
-        ddl_lines = []
-
-        for line in lines:
-            line = line.strip()
-            # 주석 라인이나 빈 라인 건너뛰기
-            if line and not line.startswith("--") and not line.startswith("#"):
-                ddl_lines.append(line)
-
-        if not ddl_lines:
-            return "UNKNOWN"
-
-        # 전체 내용을 분석하여 구문 타입별 개수 계산
-        full_content = " ".join(ddl_lines).upper()
-
-        # 개별 구문들을 분석
-        statements = []
-        for line in ddl_lines:
-            line_upper = line.upper().strip()
-            if line_upper and not line_upper.startswith("/*"):
-                statements.append(line_upper)
-
-        # 구문 타입별 개수 계산
-        type_counts = {
-            "SELECT": 0,
-            "INSERT": 0,
-            "UPDATE": 0,
-            "DELETE": 0,
-            "CREATE_TABLE": 0,
-            "ALTER_TABLE": 0,
-            "CREATE_INDEX": 0,
-            "DROP_TABLE": 0,
-            "DROP_INDEX": 0,
-            "RENAME": 0,
-        }
-
-        # 각 구문 분석 - 세미콜론으로 분리된 실제 구문 단위로 계산
-        sql_statements = [
-            stmt.strip() for stmt in ddl_content.split(";") if stmt.strip()
-        ]
-
-        for stmt in sql_statements:
-            stmt_upper = stmt.upper().strip()
-
-            # /* */ 스타일 주석 제거
-            stmt_upper = re.sub(r"/\*.*?\*/", "", stmt_upper, flags=re.DOTALL)
-
-            # -- 스타일 주석 제거
-            stmt_lines = [
-                line.strip()
-                for line in stmt_upper.split("\n")
-                if line.strip() and not line.strip().startswith("--")
-            ]
-            if not stmt_lines:
-                continue
-
-            stmt_clean = " ".join(stmt_lines).strip()
-
-            if stmt_clean.startswith("SELECT"):
-                type_counts["SELECT"] += 1
-            elif stmt_clean.startswith("INSERT"):
-                type_counts["INSERT"] += 1
-            elif stmt_clean.startswith("UPDATE"):
-                type_counts["UPDATE"] += 1
-            elif stmt_clean.startswith("DELETE"):
-                type_counts["DELETE"] += 1
-            elif stmt_clean.startswith("CREATE TABLE"):
-                type_counts["CREATE_TABLE"] += 1
-            elif stmt_clean.startswith("ALTER TABLE") or re.search(
-                r"\bALTER\s+TABLE\b", stmt_clean
-            ):
-                type_counts["ALTER_TABLE"] += 1
-            elif stmt_clean.startswith("CREATE INDEX"):
-                type_counts["CREATE_INDEX"] += 1
-            elif stmt_clean.startswith("DROP TABLE"):
-                type_counts["DROP_TABLE"] += 1
-            elif stmt_clean.startswith("DROP INDEX"):
-                type_counts["DROP_INDEX"] += 1
-            elif stmt_clean.startswith("RENAME TABLE") or re.search(
-                r"\bRENAME\s+TABLE\b", stmt_clean
-            ):
-                type_counts["RENAME"] += 1
-
-        # 총 구문 수
-        total_statements = sum(type_counts.values())
-
-        # 디버그 로그 추가
-        if debug_log:
-            debug_log(f"DEBUG - 구문 개수: {type_counts}")
-            debug_log(f"DEBUG - 총 구문: {total_statements}")
-
-        # DDL and DML count calculation
-        ddl_count = (
-            type_counts["CREATE_TABLE"]
-            + type_counts["ALTER_TABLE"]
-            + type_counts["CREATE_INDEX"]
-            + type_counts["DROP_TABLE"]
-            + type_counts["DROP_INDEX"]
-            + type_counts["RENAME"]
-        )
-
-        dml_count = (
-            type_counts["SELECT"]
-            + type_counts["INSERT"]
-            + type_counts["UPDATE"]
-            + type_counts["DELETE"]
-        )
-
-        # Return MIXED_SELECT if both DDL and DML are present
-        if ddl_count > 0 and dml_count > 0:
-            if debug_log:
-                debug_log(f"DEBUG - DDL({ddl_count}) and DML({dml_count}) mixed, MIXED_SELECT")
-            return "MIXED_SELECT"
-
-        # 기존 우선순위 로직 (DDL 우선)
-        if type_counts["CREATE_TABLE"] > 0:
-            return "CREATE_TABLE"
-        elif type_counts["ALTER_TABLE"] > 0 or type_counts["RENAME"] > 0:
-            return "ALTER_TABLE"
-        elif type_counts["CREATE_INDEX"] > 0:
-            return "CREATE_INDEX"
-        elif type_counts["DROP_TABLE"] > 0:
-            return "DROP_TABLE"
-        elif type_counts["DROP_INDEX"] > 0:
-            return "DROP_INDEX"
-        elif type_counts["SELECT"] > 0:
-            return "SELECT"
-        elif type_counts["INSERT"] > 0:
-            return "INSERT"
-        elif type_counts["UPDATE"] > 0:
-            return "UPDATE"
-        elif type_counts["DELETE"] > 0:
-            return "DELETE"
-
-        # 기타 구문 처리
-        if any(stmt.startswith("SHOW ") for stmt in statements):
-            return "SHOW"
-        elif any(stmt.startswith("SET ") for stmt in statements):
-            return "SET"
-        elif any(stmt.startswith("USE ") for stmt in statements):
-            return "USE"
-        else:
-            return "UNKNOWN"
 
     def detect_ddl_type(self, ddl_content: str) -> str:
         """DDL 타입 감지"""
@@ -2728,9 +2449,13 @@ SQL 쿼리:"""
         explain_info: str = None,
         sql_type: str = None,
         schema_validation_summary: str = None,
+        skipped_queries: list = None,
     ) -> str:
         """
         Claude cross-region 프로파일을 활용한 DDL 검증 (실제 스키마 정보 포함)
+
+        Args:
+            skipped_queries: 파일 내 생성된 테이블을 참조하여 EXPLAIN이 스킵된 쿼리 목록
         """
         # 스키마 정보가 제공되지 않았고 database_secret이 있으면 스키마 정보 추출
         if schema_info is None and database_secret:
@@ -2914,6 +2639,31 @@ SELECT, UPDATE, DELETE, INSERT 등의 DML 구문에 대해서만 EXPLAIN 분석�
 스키마 검증에서 문제가 발견된 경우, 실패로 결론을 내리고 왜 문제가 나왔는지도 설명하면서 검증해주세요.
 """
 
+        # 스킵된 쿼리 정보 컨텍스트 추가 (임시 스키마 시뮬레이션)
+        skipped_queries_context = ""
+        if skipped_queries and len(skipped_queries) > 0:
+            skipped_details = []
+            for sq in skipped_queries:
+                query_summary = sq.get('query', '')
+                tables = ', '.join(sq.get('tables', []))
+                skipped_details.append(f"  - 쿼리 {sq.get('query_num')}: {query_summary}")
+                skipped_details.append(f"    참조 테이블: {tables}")
+
+            skipped_queries_context = f"""
+**중요: 성능 검증이 스킵된 쿼리**
+
+다음 쿼리들은 파일 내에서 생성된 테이블을 참조하므로, 실제 데이터베이스에 테이블이 존재하지 않아 EXPLAIN 성능 분석을 수행하지 못했습니다:
+
+{chr(10).join(skipped_details)}
+
+**검증 지침:**
+1. 위 쿼리들은 **문법 검증만 수행**하고, 성능 검증은 수행하지 않았습니다.
+2. 테이블이 파일 내에서 생성되므로 "테이블 존재 여부"는 문제가 아닙니다.
+3. 성능 분석 결과가 없으므로, **성능 문제로 인한 실패 판정은 하지 마세요**.
+4. 문법적으로 올바르다면 "검증 통과 (성능 분석 미실행: 파일 내 생성 테이블 참조)"로 표시하세요.
+5. 사용자에게 "실제 테이블 생성 후 별도의 성능 검증이 필요합니다"라고 안내하세요.
+"""
+
         # Knowledge Base에서 관련 정보 조회
         knowledge_context = ""
         try:
@@ -2949,6 +2699,8 @@ Knowledge Base 참고 정보:
 
         {schema_validation_context}
 
+        {skipped_queries_context}
+
         {knowledge_context}
 
         **검증 기준:**
@@ -2979,6 +2731,8 @@ Knowledge Base 참고 정보:
         {explain_context}
 
         {schema_validation_context}
+
+        {skipped_queries_context}
 
         {knowledge_context}
 
@@ -3016,7 +2770,7 @@ Knowledge Base 참고 정보:
         else:
             # 기본 프롬프트
             prompt = f"""
-        다음 SQL 문을 Aurora MySQL 문법으로 검증해주세요: 
+        다음 SQL 문을 Aurora MySQL 문법으로 검증해주세요:
 
         {ddl_content}
 
@@ -3025,6 +2779,8 @@ Knowledge Base 참고 정보:
         {explain_context}
 
         {schema_validation_context}
+
+        {skipped_queries_context}
 
         {knowledge_context}
 
@@ -3826,815 +3582,16 @@ Knowledge Base 성능 최적화 가이드:
                 self.cleanup_ssh_tunnel()
             return {}
 
-    def validate_dml_columns(self, sql_content: str, cursor, debug_log) -> dict:
-        """DML 쿼리의 컬럼 존재 여부 검증 - CREATE 구문 고려"""
-        try:
-            debug_log("=== DML 컬럼 검증 시작 ===")
-            if not sqlparse:
-                debug_log("sqlparse 모듈이 없어 DML 컬럼 검증을 건너뜁니다")
-                return {"total_queries": 0, "queries_with_issues": 0, "results": []}
 
-            # 현재 SQL에서 생성되는 테이블 추출
-            created_tables = self.extract_created_tables(sql_content)
-            debug_log(f"DML 검증에서 생성되는 테이블: {created_tables}")
 
-            # 스키마 캐시
-            schema_cache = {}
 
-            def get_table_columns(table_name: str) -> set:
-                """테이블의 컬럼 목록 조회 (스키마 정보 포함 처리)"""
-                if table_name in schema_cache:
-                    return schema_cache[table_name]
 
-                try:
-                    schema, actual_table = parse_table_name(table_name)
 
-                    if schema:
-                        cursor.execute(
-                            """
-                            SELECT column_name 
-                            FROM information_schema.columns 
-                            WHERE table_schema = %s AND table_name = %s
-                        """,
-                            (schema, actual_table),
-                        )
-                    else:
-                        cursor.execute(
-                            """
-                            SELECT column_name 
-                            FROM information_schema.columns 
-                            WHERE table_schema = DATABASE() AND table_name = %s
-                        """,
-                            (actual_table,),
-                        )
 
-                    columns = {row[0].lower() for row in cursor.fetchall()}
-                    schema_cache[table_name] = columns
-                    debug_log(f"테이블 '{table_name}' 컬럼 조회: {columns}")
-                    return columns
-                except Exception as e:
-                    debug_log(f"테이블 '{table_name}' 컬럼 조회 실패: {e}")
-                    return set()
 
-            def table_exists(table_name: str) -> bool:
-                """테이블 존재 여부 확인 (스키마 정보 포함 처리)"""
-                try:
-                    schema, actual_table = parse_table_name(table_name)
 
-                    if schema:
-                        # 스키마가 명시된 경우
-                        cursor.execute(
-                            """
-                            SELECT COUNT(*) FROM information_schema.tables 
-                            WHERE table_schema = %s AND table_name = %s
-                        """,
-                            (schema, actual_table),
-                        )
-                    else:
-                        # 스키마가 없는 경우 현재 데이터베이스에서 검색
-                        cursor.execute(
-                            """
-                            SELECT COUNT(*) FROM information_schema.tables 
-                            WHERE table_schema = DATABASE() AND table_name = %s
-                        """,
-                            (actual_table,),
-                        )
-                    return cursor.fetchone()[0] > 0
-                except:
-                    return False
 
-            # SQL 문에서 사용된 컬럼들 추출
-            validation_results = []
 
-            # 주석 제거
-            cleaned_sql = re.sub(r"--.*$", "", sql_content, flags=re.MULTILINE)
-
-            # 각 쿼리별로 검증
-            statements = sqlparse.split(cleaned_sql)
-            debug_log(f"총 {len(statements)}개의 구문으로 분리됨")
-
-            for i, stmt in enumerate(statements):
-                if not stmt.strip():
-                    continue
-
-                stmt_lower = stmt.lower()
-                issues = []
-                debug_log(f"구문 {i+1} 검증 시작: {stmt_lower[:50]}...")
-
-                # SELECT, UPDATE, DELETE 쿼리에서 컬럼 추출
-                if any(
-                    keyword in stmt_lower for keyword in ["select", "update", "delete"]
-                ):
-                    debug_log(f"구문 {i+1}은 DML 쿼리입니다")
-                    # FROM 절에서 테이블 추출
-                    # FROM과 JOIN에서 테이블명 추출 (스키마 정보 포함 처리)
-                    debug_log(f"구문 {i+1} 원본: {stmt}")
-                    from_pattern = r"from\s+(?:(\w+)\.)?(\w+)(?:\s+(?:as\s+)?(\w+))?(?=\s+(?:where|order|group|limit|join|inner|left|right|full|cross|$|;))"
-                    from_tables = re.findall(from_pattern, stmt_lower)
-                    debug_log(f"구문 {i+1} FROM 패턴 결과: {from_tables}")
-
-                    join_pattern = r"join\s+(?:(\w+)\.)?(\w+)(?:\s+(?:as\s+)?(\w+))?(?=\s+(?:on|$|;))"
-                    join_tables = re.findall(join_pattern, stmt_lower)
-                    debug_log(f"구문 {i+1} JOIN 패턴 결과: {join_tables}")
-
-                    # 테이블 별칭 매핑
-                    table_aliases = {}
-                    all_tables = set()
-
-                    for schema, table, alias in from_tables + join_tables:
-                        full_table_name = f"{schema}.{table}" if schema else table
-                        all_tables.add(full_table_name)
-                        debug_log(
-                            f"구문 {i+1} 테이블 추가: schema={schema}, table={table}, full_name={full_table_name}"
-                        )
-                        if alias and alias not in [
-                            "where",
-                            "order",
-                            "group",
-                            "limit",
-                            "join",
-                            "inner",
-                            "left",
-                            "right",
-                            "full",
-                            "cross",
-                            "on",
-                        ]:
-                            table_aliases[alias] = full_table_name
-
-                    debug_log(f"구문 {i+1}에서 참조하는 테이블: {all_tables}")
-
-                    # 새로 생성되는 테이블을 참조하는지 확인
-                    references_new_table = any(
-                        table in created_tables for table in all_tables
-                    )
-                    if references_new_table:
-                        debug_log(
-                            f"구문 {i+1}: 새로 생성되는 테이블을 참조하므로 DML 컬럼 검증 스킵: {[t for t in all_tables if t in created_tables]}"
-                        )
-                        continue
-
-                    # 테이블.컬럼 형태의 컬럼 참조 찾기 (FROM/JOIN에서 이미 추출된 테이블만 고려)
-                    column_refs = []
-                    for table_or_alias in all_tables | set(table_aliases.keys()):
-                        # 각 테이블/별칭에 대해 컬럼 참조 찾기
-                        pattern = rf"\b{re.escape(table_or_alias)}\.(\w+)"
-                        matches = re.findall(pattern, stmt_lower)
-                        for column in matches:
-                            column_refs.append((table_or_alias, column))
-
-                    debug_log(f"구문 {i+1}에서 발견된 컬럼 참조: {column_refs}")
-
-                    # 컬럼 존재 여부 검증
-                    for table_ref, column_name in column_refs:
-                        # 실제 테이블명 해결
-                        actual_table = table_aliases.get(table_ref, table_ref)
-
-                        # 새로 생성되는 테이블이면 스킵 (이중 체크)
-                        if actual_table in created_tables:
-                            debug_log(
-                                f"테이블 '{actual_table}'은 새로 생성되므로 컬럼 검증 스킵"
-                            )
-                            continue
-
-                        if (
-                            actual_table in all_tables
-                            or actual_table in schema_cache
-                            or table_exists(actual_table)
-                        ):
-                            existing_columns = get_table_columns(actual_table)
-
-                            if (
-                                column_name not in existing_columns
-                                and column_name != "*"
-                            ):
-                                issues.append(
-                                    {
-                                        "type": "MISSING_COLUMN",
-                                        "table": actual_table,
-                                        "column": column_name,
-                                        "message": f"컬럼 '{column_name}'이 테이블 '{actual_table}'에 존재하지 않습니다",
-                                    }
-                                )
-                else:
-                    debug_log(f"구문 {i+1}은 DML 쿼리가 아닙니다")
-
-                if issues:
-                    validation_results.append(
-                        {
-                            "sql": (
-                                stmt.strip()[:100] + "..."
-                                if len(stmt.strip()) > 100
-                                else stmt.strip()
-                            ),
-                            "issues": issues,
-                        }
-                    )
-
-            debug_log(
-                f"=== DML 컬럼 검증 완료: {len(validation_results)}개 쿼리에서 이슈 발견 ==="
-            )
-            return {
-                "total_queries": len([s for s in statements if s.strip()]),
-                "queries_with_issues": len(validation_results),
-                "results": validation_results,
-            }
-
-        except Exception as e:
-            debug_log(f"DML 컬럼 검증 예외: {e}")
-            return {"total_queries": 0, "queries_with_issues": 0, "results": []}
-
-    async def test_database_connection_for_validation(
-        self, database_secret: str, use_ssh_tunnel: bool = False  # EC2에서는 VPC 직접 연결
-    ) -> Dict[str, Any]:
-        """검증용 데이터베이스 연결 테스트"""
-        try:
-            connection, tunnel_used = await self.get_db_connection(
-                database_secret, self.selected_database, use_ssh_tunnel
-            )
-
-            if connection.is_connected():
-                db_info = connection.get_server_info()
-                cursor = connection.cursor()
-                cursor.execute("SELECT DATABASE()")
-                current_db = cursor.fetchone()[0]
-
-                cursor.close()
-                connection.close()
-
-                result = {
-                    "success": True,
-                    "server_version": db_info,
-                    "current_database": current_db,
-                    "connection_method": "SSH Tunnel" if tunnel_used else "Direct",
-                    "host": "localhost" if tunnel_used else "remote",
-                    "port": 3307 if tunnel_used else 3306,
-                }
-
-                # SSH 터널 정리
-                if tunnel_used:
-                    self.cleanup_ssh_tunnel()
-
-                return result
-            else:
-                if tunnel_used:
-                    self.cleanup_ssh_tunnel()
-                return {"success": False, "error": "데이터베이스 연결에 실패했습니다."}
-
-        except MySQLError as e:
-            if use_ssh_tunnel:
-                self.cleanup_ssh_tunnel()
-            return {"success": False, "error": f"MySQL 오류: {str(e)}"}
-        except Exception as e:
-            if use_ssh_tunnel:
-                self.cleanup_ssh_tunnel()
-            return {"success": False, "error": f"연결 테스트 오류: {str(e)}"}
-
-    async def validate_constraints(
-        self, ddl_content: str, database_secret: str, use_ssh_tunnel: bool = False  # EC2에서는 VPC 직접 연결
-    ) -> Dict[str, Any]:
-        """제약조건 검증 - FK, 인덱스, 제약조건 확인"""
-        try:
-            # DDL에서 제약조건 정보 추출
-            constraints_info = self.parse_ddl_constraints(ddl_content)
-
-            connection, tunnel_used = await self.get_db_connection(
-                database_secret, self.selected_database, use_ssh_tunnel
-            )
-            cursor = connection.cursor()
-
-            constraint_results = []
-
-            # 외래키 제약조건 검증
-            if constraints_info.get("foreign_keys"):
-                for fk in constraints_info["foreign_keys"]:
-                    # 참조 테이블 존재 여부 확인
-                    cursor.execute(
-                        """
-                        SELECT COUNT(*) FROM information_schema.tables 
-                        WHERE table_schema = DATABASE() AND table_name = %s
-                    """,
-                        (fk["referenced_table"],),
-                    )
-
-                    ref_table_exists = cursor.fetchone()[0] > 0
-
-                    if ref_table_exists:
-                        # 참조 컬럼 존재 여부 확인
-                        cursor.execute(
-                            """
-                            SELECT COUNT(*) FROM information_schema.columns 
-                            WHERE table_schema = DATABASE() 
-                            AND table_name = %s AND column_name = %s
-                        """,
-                            (fk["referenced_table"], fk["referenced_column"]),
-                        )
-
-                        ref_column_exists = cursor.fetchone()[0] > 0
-
-                        constraint_results.append(
-                            {
-                                "type": "FOREIGN_KEY",
-                                "constraint": f"{fk['column']} -> {fk['referenced_table']}.{fk['referenced_column']}",
-                                "valid": ref_column_exists,
-                                "issue": (
-                                    None
-                                    if ref_column_exists
-                                    else f"참조 컬럼 '{fk['referenced_table']}.{fk['referenced_column']}'이 존재하지 않습니다."
-                                ),
-                            }
-                        )
-                    else:
-                        constraint_results.append(
-                            {
-                                "type": "FOREIGN_KEY",
-                                "constraint": f"{fk['column']} -> {fk['referenced_table']}.{fk['referenced_column']}",
-                                "valid": False,
-                                "issue": f"참조 테이블 '{fk['referenced_table']}'이 존재하지 않습니다.",
-                            }
-                        )
-
-            cursor.close()
-            connection.close()
-
-            # SSH 터널 정리
-            if tunnel_used:
-                self.cleanup_ssh_tunnel()
-
-            return {"success": True, "constraint_results": constraint_results}
-
-        except Exception as e:
-            if use_ssh_tunnel:
-                self.cleanup_ssh_tunnel()
-            return {"success": False, "error": f"제약조건 검증 오류: {str(e)}"}
-
-    def parse_ddl_detailed(self, ddl_content: str) -> List[Dict[str, Any]]:
-        """DDL 구문을 상세하게 파싱하여 구문 유형별 정보 추출"""
-        ddl_statements = []
-
-        # CREATE TABLE 파싱
-        create_table_pattern = r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?\s*\((.*?)\)(?:\s*ENGINE\s*=\s*\w+)?(?:\s*COMMENT\s*=\s*[\'"][^\'"]*[\'"])?'
-        create_matches = re.findall(
-            create_table_pattern, ddl_content, re.DOTALL | re.IGNORECASE
-        )
-
-        for table_name, columns_def in create_matches:
-            columns_info = self.parse_create_table_columns(columns_def)
-            ddl_statements.append(
-                {
-                    "type": "CREATE_TABLE",
-                    "table": table_name.lower(),
-                    "columns": columns_info["columns"],
-                    "constraints": columns_info["constraints"],
-                }
-            )
-
-        # ALTER TABLE 파싱
-        alter_patterns = [
-            # ADD COLUMN
-            (
-                r"ALTER\s+TABLE\s+`?(\w+)`?\s+ADD\s+(?:COLUMN\s+)?`?(\w+)`?\s+([^,;]+)",
-                "ADD_COLUMN",
-            ),
-            # DROP COLUMN
-            (
-                r"ALTER\s+TABLE\s+`?(\w+)`?\s+DROP\s+(?:COLUMN\s+)?`?(\w+)`?",
-                "DROP_COLUMN",
-            ),
-            # MODIFY COLUMN
-            (
-                r"ALTER\s+TABLE\s+`?(\w+)`?\s+MODIFY\s+(?:COLUMN\s+)?`?(\w+)`?\s+([^,;]+)",
-                "MODIFY_COLUMN",
-            ),
-            # CHANGE COLUMN
-            (
-                r"ALTER\s+TABLE\s+`?(\w+)`?\s+CHANGE\s+(?:COLUMN\s+)?`?(\w+)`?\s+`?(\w+)`?\s+([^,;]+)",
-                "CHANGE_COLUMN",
-            ),
-        ]
-
-        for pattern, alter_type in alter_patterns:
-            matches = re.findall(pattern, ddl_content, re.IGNORECASE)
-            for match in matches:
-                if alter_type == "CHANGE_COLUMN":
-                    table_name, old_column, new_column, column_def = match
-                    ddl_statements.append(
-                        {
-                            "type": "ALTER_TABLE",
-                            "table": table_name.lower(),
-                            "alter_type": alter_type,
-                            "old_column": old_column.lower(),
-                            "new_column": new_column.lower(),
-                            "column_definition": column_def.strip(),
-                        }
-                    )
-                else:
-                    table_name, column_name = match[:2]
-                    column_def = match[2] if len(match) > 2 else None
-                    ddl_statements.append(
-                        {
-                            "type": "ALTER_TABLE",
-                            "table": table_name.lower(),
-                            "alter_type": alter_type,
-                            "column": column_name.lower(),
-                            "column_definition": (
-                                column_def.strip() if column_def else None
-                            ),
-                        }
-                    )
-
-        # CREATE INDEX 파싱
-        create_index_pattern = (
-            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+`?(\w+)`?\s+ON\s+`?(\w+)`?\s*\(([^)]+)\)"
-        )
-        index_matches = re.findall(create_index_pattern, ddl_content, re.IGNORECASE)
-
-        for index_name, table_name, columns in index_matches:
-            ddl_statements.append(
-                {
-                    "type": "CREATE_INDEX",
-                    "table": table_name.lower(),
-                    "index_name": index_name.lower(),
-                    "columns": [
-                        col.strip().strip("`").lower() for col in columns.split(",")
-                    ],
-                }
-            )
-
-        # DROP TABLE 파싱
-        drop_table_pattern = r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?"
-        drop_table_matches = re.findall(drop_table_pattern, ddl_content, re.IGNORECASE)
-
-        for table_name in drop_table_matches:
-            ddl_statements.append({"type": "DROP_TABLE", "table": table_name.lower()})
-
-        # DROP INDEX 파싱
-        drop_index_pattern = r"DROP\s+INDEX\s+`?(\w+)`?\s+ON\s+`?(\w+)`?"
-        drop_index_matches = re.findall(drop_index_pattern, ddl_content, re.IGNORECASE)
-
-        print(f"[DEBUG] DROP INDEX 파싱 - 패턴: {drop_index_pattern}")
-        print(f"[DEBUG] DROP INDEX 파싱 - 입력: {repr(ddl_content)}")
-        print(f"[DEBUG] DROP INDEX 파싱 - 결과: {drop_index_matches}")
-
-        for index_name, table_name in drop_index_matches:
-            ddl_statements.append(
-                {
-                    "type": "DROP_INDEX",
-                    "table": table_name.lower(),
-                    "index_name": index_name.lower(),
-                }
-            )
-            print(f"[DEBUG] DROP INDEX 구문 추가됨: {index_name} on {table_name}")
-
-        print(f"[DEBUG] 전체 파싱 결과: {len(ddl_statements)}개 구문")
-        for i, stmt in enumerate(ddl_statements):
-            print(f"[DEBUG]   [{i}] {stmt['type']}: {stmt}")
-
-        return ddl_statements
-
-    def parse_create_table_columns(self, columns_def: str) -> Dict[str, Any]:
-        """CREATE TABLE의 컬럼 정의 파싱"""
-        columns = []
-        constraints = []
-
-        # 컬럼 정의와 제약조건을 분리
-        lines = [line.strip() for line in columns_def.split(",")]
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # 제약조건 확인
-            if re.match(
-                r"(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|INDEX|KEY)",
-                line,
-                re.IGNORECASE,
-            ):
-                constraints.append(line)
-            else:
-                # 컬럼 정의 파싱
-                column_match = re.match(
-                    r"`?(\w+)`?\s+([^,\s]+)(?:\s+(.*))?", line, re.IGNORECASE
-                )
-                if column_match:
-                    column_name = column_match.group(1).lower()
-                    data_type = column_match.group(2).upper()
-                    attributes = column_match.group(3) or ""
-
-                    columns.append(
-                        {
-                            "name": column_name,
-                            "data_type": data_type,
-                            "attributes": attributes.strip(),
-                        }
-                    )
-
-        return {"columns": columns, "constraints": constraints}
-
-    def parse_ddl_constraints(self, ddl_content: str) -> Dict[str, List[Dict]]:
-        """DDL에서 제약조건 정보 추출"""
-        constraints = {"foreign_keys": [], "indexes": [], "primary_keys": []}
-
-        # 외래키 패턴 매칭
-        fk_pattern = (
-            r"FOREIGN\s+KEY\s*\(`?(\w+)`?\)\s*REFERENCES\s+`?(\w+)`?\s*\(`?(\w+)`?\)"
-        )
-        fk_matches = re.findall(fk_pattern, ddl_content, re.IGNORECASE)
-
-        for column, ref_table, ref_column in fk_matches:
-            constraints["foreign_keys"].append(
-                {
-                    "column": column,
-                    "referenced_table": ref_table,
-                    "referenced_column": ref_column,
-                }
-            )
-
-        return constraints
-
-    async def validate_create_table(
-        self, cursor, ddl_statement: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """CREATE TABLE 구문 검증"""
-        table_name = ddl_statement["table"]
-        columns = ddl_statement["columns"]
-
-        # 테이블 존재 여부 확인
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables 
-            WHERE table_schema = DATABASE() AND table_name = %s
-        """,
-            (table_name,),
-        )
-
-        table_exists = cursor.fetchone()[0] > 0
-        issues = []
-
-        if table_exists:
-            issues.append(f"테이블 '{table_name}'이 이미 존재합니다.")
-
-        return {
-            "table": table_name,
-            "ddl_type": "CREATE_TABLE",
-            "valid": not table_exists,
-            "issues": issues,
-            "details": {"table_exists": table_exists, "columns_count": len(columns)},
-        }
-
-    async def validate_alter_table(
-        self, cursor, ddl_statement: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """ALTER TABLE 구문 검증"""
-        table_name = ddl_statement["table"]
-        alter_type = ddl_statement["alter_type"]
-
-        # 테이블 존재 여부 확인
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables 
-            WHERE table_schema = DATABASE() AND table_name = %s
-        """,
-            (table_name,),
-        )
-
-        table_exists = cursor.fetchone()[0] > 0
-        issues = []
-
-        if not table_exists:
-            issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
-            return {
-                "table": table_name,
-                "ddl_type": "ALTER_TABLE",
-                "alter_type": alter_type,
-                "valid": False,
-                "issues": issues,
-            }
-
-        # 현재 테이블의 컬럼 정보 조회
-        cursor.execute(
-            """
-            SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable
-            FROM information_schema.columns 
-            WHERE table_schema = DATABASE() AND table_name = %s
-        """,
-            (table_name,),
-        )
-
-        existing_columns = {
-            row[0].lower(): {
-                "data_type": row[1].upper(),
-                "max_length": row[2],
-                "precision": row[3],
-                "scale": row[4],
-                "is_nullable": row[5],
-            }
-            for row in cursor.fetchall()
-        }
-
-        # ALTER 유형별 검증
-        if alter_type == "ADD_COLUMN":
-            column_name = ddl_statement["column"]
-            if column_name in existing_columns:
-                issues.append(f"컬럼 '{column_name}'이 이미 존재합니다.")
-
-        elif alter_type == "DROP_COLUMN":
-            column_name = ddl_statement["column"]
-            if column_name not in existing_columns:
-                issues.append(f"컬럼 '{column_name}'이 존재하지 않습니다.")
-
-        elif alter_type == "MODIFY_COLUMN":
-            column_name = ddl_statement["column"]
-            new_definition = ddl_statement["column_definition"]
-
-            if column_name not in existing_columns:
-                issues.append(f"컬럼 '{column_name}'이 존재하지 않습니다.")
-            else:
-                # 데이터 타입 변경 가능성 검증
-                validation_result = self.validate_column_type_change(
-                    existing_columns[column_name], new_definition
-                )
-                if not validation_result["valid"]:
-                    issues.extend(validation_result["issues"])
-
-        elif alter_type == "CHANGE_COLUMN":
-            old_column = ddl_statement["old_column"]
-            new_column = ddl_statement["new_column"]
-            new_definition = ddl_statement["column_definition"]
-
-            if old_column not in existing_columns:
-                issues.append(f"기존 컬럼 '{old_column}'이 존재하지 않습니다.")
-            elif new_column != old_column and new_column in existing_columns:
-                issues.append(f"새 컬럼명 '{new_column}'이 이미 존재합니다.")
-            else:
-                # 데이터 타입 변경 가능성 검증
-                validation_result = self.validate_column_type_change(
-                    existing_columns[old_column], new_definition
-                )
-                if not validation_result["valid"]:
-                    issues.extend(validation_result["issues"])
-
-        return {
-            "table": table_name,
-            "ddl_type": "ALTER_TABLE",
-            "alter_type": alter_type,
-            "valid": len(issues) == 0,
-            "issues": issues,
-            "details": {"existing_columns": list(existing_columns.keys())},
-        }
-
-    async def validate_create_index(
-        self, cursor, ddl_statement: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """CREATE INDEX 구문 검증"""
-        table_name = ddl_statement["table"]
-        index_name = ddl_statement["index_name"]
-        columns = ddl_statement["columns"]
-
-        issues = []
-
-        # 테이블 존재 여부 확인
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables 
-            WHERE table_schema = DATABASE() AND table_name = %s
-        """,
-            (table_name,),
-        )
-
-        table_exists = cursor.fetchone()[0] > 0
-
-        if not table_exists:
-            issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
-        else:
-            # 인덱스 존재 여부 확인
-            cursor.execute(
-                """
-                SELECT COUNT(*) FROM information_schema.statistics 
-                WHERE table_schema = DATABASE() AND table_name = %s AND index_name = %s
-            """,
-                (table_name, index_name),
-            )
-
-            index_exists = cursor.fetchone()[0] > 0
-
-            if index_exists:
-                issues.append(f"인덱스 '{index_name}'이 이미 존재합니다.")
-
-            # 컬럼 존재 여부 확인
-            cursor.execute(
-                """
-                SELECT column_name FROM information_schema.columns 
-                WHERE table_schema = DATABASE() AND table_name = %s
-            """,
-                (table_name,),
-            )
-
-            existing_columns = {row[0].lower() for row in cursor.fetchall()}
-
-            for column in columns:
-                if column not in existing_columns:
-                    issues.append(
-                        f"컬럼 '{column}'이 테이블 '{table_name}'에 존재하지 않습니다."
-                    )
-
-        return {
-            "table": table_name,
-            "ddl_type": "CREATE_INDEX",
-            "valid": len(issues) == 0,
-            "issues": issues,
-            "details": {"index_name": index_name, "columns": columns},
-        }
-
-    async def validate_drop_table(
-        self, cursor, ddl_statement: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """DROP TABLE 구문 검증 (호환성 유지용)"""
-        table_name = ddl_statement["table"]
-
-        # 테이블 존재 여부 확인
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables 
-            WHERE table_schema = DATABASE() AND table_name = %s
-        """,
-            (table_name,),
-        )
-
-        table_exists = cursor.fetchone()[0] > 0
-        issues = []
-
-        if not table_exists:
-            issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
-
-        return {
-            "table": table_name,
-            "ddl_type": "DROP_TABLE",
-            "valid": table_exists,
-            "issues": issues,
-            "details": {"table_exists": table_exists},
-        }
-
-    async def validate_drop_index(
-        self, cursor, ddl_statement: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """DROP INDEX 구문 검증"""
-        table_name = ddl_statement["table"]
-        index_name = ddl_statement["index_name"]
-
-        print(f"[DEBUG] DROP INDEX 검증 시작: table={table_name}, index={index_name}")
-
-        issues = []
-
-        # 테이블 존재 여부 확인
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables 
-            WHERE table_schema = DATABASE() AND table_name = %s
-        """,
-            (table_name,),
-        )
-
-        table_exists = cursor.fetchone()[0] > 0
-        print(f"[DEBUG] 테이블 '{table_name}' 존재 여부: {table_exists}")
-
-        if not table_exists:
-            issues.append(f"테이블 '{table_name}'이 존재하지 않습니다.")
-            print(f"[DEBUG] 테이블 '{table_name}'이 존재하지 않음 - 이슈 추가")
-        else:
-            # 인덱스 존재 여부 확인
-            cursor.execute(
-                """
-                SELECT COUNT(*) FROM information_schema.statistics 
-                WHERE table_schema = DATABASE() AND table_name = %s AND index_name = %s
-            """,
-                (table_name, index_name),
-            )
-
-            index_exists = cursor.fetchone()[0] > 0
-            print(f"[DEBUG] 인덱스 '{index_name}' 존재 여부: {index_exists}")
-
-            if not index_exists:
-                issues.append(
-                    f"인덱스 '{index_name}'이 테이블 '{table_name}'에 존재하지 않습니다."
-                )
-                print(f"[DEBUG] 인덱스 '{index_name}'이 존재하지 않음 - 이슈 추가")
-
-        result = {
-            "table": table_name,
-            "ddl_type": "DROP_INDEX",
-            "valid": len(issues) == 0,
-            "issues": issues,
-            "details": {"index_name": index_name, "table_exists": table_exists},
-        }
-
-        print(
-            f"[DEBUG] DROP INDEX 검증 완료: issues={len(issues)}, valid={len(issues) == 0}"
-        )
-        print(f"[DEBUG] 최종 결과: {result}")
-
-        return result
 
     def validate_column_type_change(
         self, existing_column: Dict[str, Any], new_definition: str
@@ -5830,71 +4787,12 @@ Knowledge Base 성능 최적화 가이드:
         return metrics
 
     def format_metrics_as_html(self, metrics: dict) -> str:
-        """메트릭 딕셔너리를 HTML로 포맷"""
-        # HTML 형태로 포맷
-        html = f"""
-        <div class="metric-grid">
-            <div class="metric-card">
-                <div class="metric-title">🖥️ CPU 사용률 (%)</div>
-                <div class="metric-value">평균: {metrics.get('cpu_mean', 0):.1f}%</div>
-                <div class="metric-unit">최대: {metrics.get('cpu_max', 0):.1f}% | 최소: {metrics.get('cpu_min', 0):.1f}%</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-title">💾 메모리 사용률 (%)</div>
-                <div class="metric-value">평균: {metrics.get('memory_usage_mean', 0):.1f}%</div>
-                <div class="metric-unit">최대: {metrics.get('memory_usage_max', 0):.1f}% | 최소: {metrics.get('memory_usage_min', 0):.1f}%</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-title">✍️ Write IOPS</div>
-                <div class="metric-value">평균: {metrics.get('write_iops_mean', 0):.2f}</div>
-                <div class="metric-unit">최대: {metrics.get('write_iops_max', 0):.2f} | 최소: {metrics.get('write_iops_min', 0):.2f}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-title">📖 Read IOPS</div>
-                <div class="metric-value">평균: {metrics.get('read_iops_mean', 0):.3f}</div>
-                <div class="metric-unit">최대: {metrics.get('read_iops_max', 0):.3f} | 최소: {metrics.get('read_iops_min', 0):.3f}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-title">🔗 연결 수</div>
-                <div class="metric-value">평균: {metrics.get('connections_mean', 0):.1f}개</div>
-                <div class="metric-unit">최대: {metrics.get('connections_max', 0):.0f}개 | 최소: {metrics.get('connections_min', 0):.0f}개</div>
-            </div>
-        </div>
-        """
-
-        return html
+        """메트릭 딕셔너리를 HTML로 포맷 (Week 3: ReportGenerator로 위임)"""
+        return self.report_generator.format_metrics_as_html(metrics)
 
     def convert_urls_to_html_links(self, text: str) -> str:
-        """텍스트 내의 URL을 HTML 링크로 변환하고 파일명을 링크로 만듦"""
-        import re
-
-        # 패턴 1: "파일명.sql\n🔗 다운로드 (7일 유효): URL" 형식을 "파일명.sql (링크)" 형식으로 변환
-        # 예: cpu_intensive_queries_gamedb1-1_20251023.sql\n🔗 다운로드 (7일 유효): https://...
-        sql_file_pattern = r'([a-zA-Z0-9_\-]+\.sql)\n🔗 다운로드 \(7일 유효\): (https?://[^\s<>"]+)'
-
-        def replace_sql_file(match):
-            filename = match.group(1)
-            url = match.group(2)
-            return f'<a href="{url}" target="_blank" style="color: #007bff; text-decoration: underline; font-weight: bold;">{filename}</a>'
-
-        # SQL 파일 + URL 패턴 먼저 변환
-        html_text = re.sub(sql_file_pattern, replace_sql_file, text)
-
-        # 패턴 2: href 속성 안에 있지 않은 일반 URL만 링크로 변환
-        # Negative lookbehind를 사용하여 'href="' 뒤에 있는 URL은 제외
-        url_pattern = r'(?<!href=")(https?://[^\s<>"]+)(?!")'
-
-        def replace_url(match):
-            url = match.group(1)
-            return f'<a href="{url}" target="_blank" style="color: #007bff; text-decoration: underline;">{url}</a>'
-
-        # 아직 링크로 변환되지 않은 URL들 변환 (href 안의 URL은 제외)
-        html_text = re.sub(url_pattern, replace_url, html_text)
-
-        # 줄바꿈을 <br>로 변환
-        html_text = html_text.replace('\n', '<br>')
-
-        return html_text
+        """텍스트 내의 URL을 HTML 링크로 변환하고 파일명을 링크로 만듦 (Week 3: ReportGenerator로 위임)"""
+        return self.report_generator.convert_urls_to_html_links(text)
 
     async def generate_comprehensive_performance_report(
         self,
@@ -7340,13 +6238,15 @@ Knowledge Base 성능 최적화 가이드:
     # === 분석 관련 메서드 ===
 
     def setup_cloudwatch_client(self, region_name: str = "us-east-1"):
-        """CloudWatch 클라이언트 설정"""
-        try:
-            self.cloudwatch = boto3.client("cloudwatch", region_name=region_name)
-            return True
-        except Exception as e:
-            logger.error(f"CloudWatch 클라이언트 설정 실패: {e}")
-            return False
+        """CloudWatch 클라이언트 설정
+
+        리팩토링: Week 2 - CloudWatchManager 모듈로 위임
+        하위 호환성을 위해 메서드 유지
+        """
+        result = self.cloudwatch_manager.setup_cloudwatch_client(region_name)
+        # 메인 서버의 cloudwatch 속성도 업데이트
+        self.cloudwatch = self.cloudwatch_manager.cloudwatch
+        return result
 
     async def collect_db_metrics(
         self,
@@ -7355,162 +6255,29 @@ Knowledge Base 성능 최적화 가이드:
         metrics: Optional[List[str]] = None,
         region: str = "us-east-1",
     ) -> str:
-        """CloudWatch에서 데이터베이스 메트릭 수집"""
-        if not ANALYSIS_AVAILABLE:
-            return "❌ 분석 라이브러리가 설치되지 않았습니다. pip install pandas numpy scikit-learn을 실행해주세요."
+        """CloudWatch에서 데이터베이스 메트릭 수집
 
-        try:
-            if not self.setup_cloudwatch_client(region):
-                return "CloudWatch 클라이언트 설정에 실패했습니다."
-
-            # 클러스터 확인 및 인스턴스 identifier 변환 (Lambda 사용)
-            try:
-                logger.info(f"Lambda로 RDS 정보 조회: {db_instance_identifier}")
-                rds_info = await self._call_lambda('get-rds-cluster-info', {
-                    'identifier': db_instance_identifier,
-                    'region': region
-                })
-
-                if rds_info['type'] == 'cluster':
-                    # 클러스터인 경우 첫 번째 writer 인스턴스 사용
-                    original_id = db_instance_identifier
-                    for member in rds_info['members']:
-                        if member['is_writer']:
-                            db_instance_identifier = member['identifier']
-                            self.current_instance_class = member.get('instance_class', 'r5.large')
-                            break
-                    logger.info(
-                        f"클러스터 {original_id}에서 인스턴스 {db_instance_identifier}로 변환"
-                    )
-                else:
-                    # 인스턴스인 경우
-                    self.current_instance_class = rds_info.get('instance_class', 'r5.large')
-                    logger.info(f"인스턴스 클래스: {self.current_instance_class}")
-
-            except Exception as e:
-                logger.warning(f"RDS 정보 조회 실패 (기본값 사용): {str(e)}")
-                self.current_instance_class = "r5.large"  # 기본값
-
-            if not metrics:
-                metrics = self.default_metrics
-
-            # CloudWatch 메트릭 수집 (Lambda 사용)
-            logger.info(f"Lambda로 CloudWatch 메트릭 수집: {db_instance_identifier}")
-            try:
-                metrics_result = await self._call_lambda('get-cloudwatch-metrics-raw', {
-                    'instance_identifier': db_instance_identifier,
-                    'metrics': metrics,
-                    'hours': hours,
-                    'region': region,
-                    'period': 300
-                })
-
-                # Lambda에서 받은 데이터를 pandas 형식으로 변환
-                data = []
-                for point in metrics_result.get('metrics_data', []):
-                    # timestamp를 datetime으로 변환
-                    timestamp = datetime.fromisoformat(point['timestamp'].replace('Z', '+00:00'))
-                    data.append({
-                        "Timestamp": timestamp.replace(tzinfo=None),
-                        "Metric": point['metric'],
-                        "Value": point['average']  # 평균값 사용
-                    })
-
-                logger.info(f"Lambda에서 {len(data)}개 데이터 포인트 수집")
-
-            except Exception as e:
-                logger.error(f"Lambda 메트릭 수집 실패: {str(e)}")
-                data = []
-
-            if not data:
-                return "수집된 데이터가 없습니다."
-
-            # 데이터프레임 생성
-            df = pd.DataFrame(data)
-            df = df.sort_values("Timestamp")
-
-            # 피벗 테이블 생성
-            pivot_df = df.pivot(index="Timestamp", columns="Metric", values="Value")
-
-            # CSV 파일로 저장 (임시)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            csv_filename = f"database_metrics_{db_instance_identifier}_{timestamp}.csv"
-            csv_file = DATA_DIR / csv_filename
-            pivot_df.to_csv(csv_file)
-
-            # S3에 업로드
-            s3_bucket = "db-assistant-query-results-dev"
-            s3_key = f"metrics/{db_instance_identifier}/{csv_filename}"
-
-            try:
-                import boto3
-                s3_client = boto3.client('s3', region_name=region)
-
-                # CSV 파일 업로드
-                s3_client.upload_file(str(csv_file), s3_bucket, s3_key)
-                logger.info(f"CSV 파일 S3 업로드 완료: s3://{s3_bucket}/{s3_key}")
-
-                # Pre-signed URL 생성 (7일 유효)
-                presigned_url = s3_client.generate_presigned_url(
-                    'get_object',
-                    Params={'Bucket': s3_bucket, 'Key': s3_key},
-                    ExpiresIn=604800  # 7일 = 604800초
-                )
-
-                # 로컬 파일 유지 (분석용)
-                logger.info(f"로컬 CSV 파일 유지: {csv_file} (분석용)")
-
-                return f"✅ 메트릭 수집 완료\n📊 수집된 메트릭: {len(metrics)}개\n📈 데이터 포인트: {len(data)}개\n💾 S3 저장 위치: s3://{s3_bucket}/{s3_key}\n📁 로컬 저장: {csv_file}\n🔗 다운로드 URL (7일 유효): {presigned_url}"
-
-            except Exception as s3_error:
-                logger.error(f"S3 업로드 실패, 로컬 파일 유지: {s3_error}")
-                return f"✅ 메트릭 수집 완료\n📊 수집된 메트릭: {len(metrics)}개\n📈 데이터 포인트: {len(data)}개\n💾 로컬 저장: {csv_file}\n⚠️  S3 업로드 실패: {str(s3_error)}"
-
-        except Exception as e:
-            return f"메트릭 수집 중 오류 발생: {str(e)}"
+        리팩토링: Week 2 - CloudWatchManager 모듈로 위임
+        하위 호환성을 위해 메서드 유지
+        """
+        result = await self.cloudwatch_manager.collect_db_metrics(
+            db_instance_identifier, hours, metrics, region
+        )
+        # current_instance_class 동기화
+        self.current_instance_class = self.cloudwatch_manager.current_instance_class
+        return result
 
     async def analyze_metric_correlation(
         self, csv_file: str, target_metric: str = "CPUUtilization", top_n: int = 10
     ) -> str:
-        """메트릭 간 상관관계 분석"""
-        if not ANALYSIS_AVAILABLE:
-            return "❌ 분석 라이브러리가 설치되지 않았습니다."
+        """메트릭 간 상관관계 분석
 
-        try:
-            # CSV 파일 경로 처리
-            if not csv_file.startswith("/"):
-                csv_path = DATA_DIR / csv_file
-            else:
-                csv_path = Path(csv_file)
-
-            if not csv_path.exists():
-                return f"CSV 파일을 찾을 수 없습니다: {csv_path}"
-
-            # 데이터 읽기
-            df = pd.read_csv(csv_path, index_col="Timestamp", parse_dates=True)
-            df = df.dropna()
-
-            if target_metric not in df.columns:
-                return f"타겟 메트릭 '{target_metric}'이 데이터에 없습니다.\n사용 가능한 메트릭: {list(df.columns)}"
-
-            # 상관 분석
-            correlation_matrix = df.corr()
-            target_correlations = correlation_matrix[target_metric].abs()
-            target_correlations = target_correlations.drop(
-                target_metric, errors="ignore"
-            )
-            top_correlations = target_correlations.nlargest(top_n)
-
-            # 결과 문자열 생성
-            result = f"📊 {target_metric}과 상관관계가 높은 상위 {top_n}개 메트릭:\n\n"
-            for metric, correlation in top_correlations.items():
-                result += f"• {metric}: {correlation:.4f}\n"
-
-            # 그래프 생성 제거됨 - 텍스트 결과만 반환
-            return result
-
-        except Exception as e:
-            return f"상관관계 분석 중 오류 발생: {str(e)}"
+        리팩토링: Week 2 - CloudWatchManager 모듈로 위임
+        하위 호환성을 위해 메서드 유지
+        """
+        return await self.cloudwatch_manager.analyze_metric_correlation(
+            csv_file, target_metric, top_n
+        )
 
     def load_metric_thresholds(self) -> dict:
         """input 폴더에서 최신 임계값 설정 파일 로드"""
@@ -7883,128 +6650,14 @@ Knowledge Base 성능 최적화 가이드:
             return f"아웃라이어 탐지 중 오류 발생: {str(e)}"
 
     def generate_threshold_html(self, thresholds: dict) -> str:
-        """임계값 설정을 HTML 테이블로 생성"""
-        html = """
-        <div id="thresholdModal" class="modal">
-            <div class="modal-content">
-                <span class="close">&times;</span>
-                <h2>📊 메트릭 임계값 설정</h2>
-                <table class="threshold-table">
-                    <thead>
-                        <tr>
-                            <th>메트릭</th>
-                            <th>탐지 방식</th>
-                            <th>임계값</th>
-                            <th>설명</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        """
-
-        for metric, config in thresholds.items():
-            method = config.get("method", "iqr")
-            threshold_info = []
-
-            if method == "absolute":
-                if config.get("high_threshold"):
-                    threshold_info.append(f"상한: {config['high_threshold']}")
-                if config.get("low_threshold"):
-                    threshold_info.append(f"하한: {config['low_threshold']}")
-            elif method == "spike":
-                threshold_info.append(f"급증 배수: {config.get('spike_factor', 3.0)}")
-            elif method == "percentage":
-                if config.get("low_threshold"):
-                    threshold_info.append(f"최소: {config['low_threshold']}%")
-
-            threshold_str = ", ".join(threshold_info) if threshold_info else "IQR 방식"
-            description = config.get("description", f"{metric} 메트릭")
-
-            html += f"""
-                        <tr>
-                            <td>{metric}</td>
-                            <td>{method}</td>
-                            <td>{threshold_str}</td>
-                            <td>{description}</td>
-                        </tr>
-            """
-
-        html += """
-                    </tbody>
-                </table>
-                <p><strong>📁 설정 파일:</strong> input/metric_thresholds_*.txt</p>
-                <p><strong>💡 수정 방법:</strong> input 폴더의 최신 임계값 파일을 편집하세요.</p>
-            </div>
-        </div>
-        """
-        return html
+        """임계값 설정을 HTML 테이블로 생성 (Week 3: ReportGenerator로 위임)"""
+        return self.report_generator.generate_threshold_html(thresholds)
 
     def save_outlier_html_report(
         self, result: str, threshold_html: str, report_path: Path
     ):
-        """아웃라이어 분석 HTML 보고서 저장"""
-        html_content = f"""
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>아웃라이어 분석 보고서</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        .header {{ text-align: center; margin-bottom: 30px; }}
-        .btn {{ background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px; }}
-        .btn:hover {{ background-color: #0056b3; }}
-        .result-content {{ white-space: pre-wrap; font-family: monospace; background: #f8f9fa; padding: 20px; border-radius: 5px; }}
-        .modal {{ display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.4); }}
-        .modal-content {{ background-color: #fefefe; margin: 5% auto; padding: 20px; border: none; border-radius: 10px; width: 80%; max-width: 800px; }}
-        .close {{ color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }}
-        .close:hover {{ color: black; }}
-        .threshold-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-        .threshold-table th, .threshold-table td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-        .threshold-table th {{ background-color: #f2f2f2; font-weight: bold; }}
-        .threshold-table tr:nth-child(even) {{ background-color: #f9f9f9; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🔍 아웃라이어 분석 보고서</h1>
-            <p>생성 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <button class="btn" onclick="document.getElementById('thresholdModal').style.display='block'">
-                📊 임계값 설정 보기
-            </button>
-        </div>
-        
-        <div class="result-content">{result}</div>
-        
-        {threshold_html}
-    </div>
-
-    <script>
-        // 모달 창 제어
-        var modal = document.getElementById('thresholdModal');
-        var span = document.getElementsByClassName('close')[0];
-        
-        span.onclick = function() {{
-            modal.style.display = 'none';
-        }}
-        
-        window.onclick = function(event) {{
-            if (event.target == modal) {{
-                modal.style.display = 'none';
-            }}
-        }}
-    </script>
-</body>
-</html>
-        """
-
-        try:
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-        except Exception as e:
-            debug_log(f"HTML 보고서 저장 실패: {e}")
+        """아웃라이어 분석 HTML 보고서 저장 (Week 3: ReportGenerator로 위임)"""
+        self.report_generator.save_outlier_html_report(result, threshold_html, report_path)
 
     async def perform_regression_analysis(
         self,
@@ -8819,16 +7472,10 @@ Knowledge Base 성능 최적화 가이드:
     ) -> str:
         """메모리 집약적 쿼리 수집 및 SQL 파일 생성 (Lambda 사용)"""
         try:
-            logger.info(f"Lambda로 메모리 집약 쿼리 수집: {database_secret}")
-
-            # Lambda 호출
-            lambda_result = await self._call_lambda('collect-memory-intensive-queries', {
-                'database_secret': database_secret,
-                'db_instance_identifier': db_instance_identifier,
-                'start_time': start_time,
-                'end_time': end_time,
-                'region': self.default_region
-            })
+            # 리팩토링: Week 1 - LambdaClient 모듈로 위임
+            lambda_result = await self.lambda_client.collect_memory_intensive_queries(
+                database_secret, db_instance_identifier, start_time, end_time
+            )
 
             if not lambda_result.get('success'):
                 error_msg = lambda_result.get('error', 'Lambda 호출 실패')
@@ -8898,16 +7545,10 @@ Knowledge Base 성능 최적화 가이드:
     ) -> str:
         """CPU 집약적 쿼리 수집 및 SQL 파일 생성 (Lambda 사용)"""
         try:
-            logger.info(f"Lambda로 CPU 집약 쿼리 수집: {database_secret}")
-
-            # Lambda 호출
-            lambda_result = await self._call_lambda('collect-cpu-intensive-queries', {
-                'database_secret': database_secret,
-                'db_instance_identifier': db_instance_identifier,
-                'start_time': start_time,
-                'end_time': end_time,
-                'region': self.default_region
-            })
+            # 리팩토링: Week 1 - LambdaClient 모듈로 위임
+            lambda_result = await self.lambda_client.collect_cpu_intensive_queries(
+                database_secret, db_instance_identifier, start_time, end_time
+            )
 
             if not lambda_result.get('success'):
                 error_msg = lambda_result.get('error', 'Lambda 호출 실패')
@@ -8976,16 +7617,10 @@ Knowledge Base 성능 최적화 가이드:
     ) -> str:
         """임시 공간 집약적 쿼리 수집 및 SQL 파일 생성 (Lambda 사용)"""
         try:
-            logger.info(f"Lambda로 Temp 공간 집약 쿼리 수집: {database_secret}")
-
-            # Lambda 호출
-            lambda_result = await self._call_lambda('collect-temp-space-intensive-queries', {
-                'database_secret': database_secret,
-                'db_instance_identifier': db_instance_identifier,
-                'start_time': start_time,
-                'end_time': end_time,
-                'region': self.default_region
-            })
+            # 리팩토링: Week 1 - LambdaClient 모듈로 위임
+            lambda_result = await self.lambda_client.collect_temp_space_intensive_queries(
+                database_secret, db_instance_identifier, start_time, end_time
+            )
 
             if not lambda_result.get('success'):
                 error_msg = lambda_result.get('error', 'Lambda 호출 실패')
@@ -9058,58 +7693,12 @@ Knowledge Base 성능 최적화 가이드:
     ) -> dict:
         """DDL 스키마 검증 (Lambda 사용)
 
-        Args:
-            database_secret: Secrets Manager secret name
-            database: 데이터베이스 이름
-            ddl_content: DDL 구문
-            region: AWS 리전
-
-        Returns:
-            dict: {
-                'success': bool,
-                'valid': bool,
-                'ddl_type': str,
-                'table_name': str,
-                'issues': list,
-                'warnings': list,
-                's3_location': str
-            }
+        리팩토링: Week 1 - LambdaClient 모듈로 위임
+        하위 호환성을 위해 메서드 유지
         """
-        try:
-            # Lambda가 database=None 처리를 담당
-            logger.info(f"Lambda로 DDL 스키마 검증: {database_secret}/{database}")
-
-            # Lambda 호출
-            lambda_result = await self._call_lambda('validate-schema', {
-                'database_secret': database_secret,
-                'database': database,
-                'ddl_content': ddl_content,
-                'region': region
-            })
-
-            if not lambda_result.get('success'):
-                error_msg = lambda_result.get('error', 'Lambda 호출 실패')
-                logger.error(f"DDL 스키마 검증 실패 (Lambda): {error_msg}")
-                return {
-                    'success': False,
-                    'valid': False,
-                    'error': error_msg
-                }
-
-            # Lambda 결과 반환
-            logger.info(f"DDL 스키마 검증 완료 - Valid: {lambda_result.get('valid')}, "
-                       f"Issues: {len(lambda_result.get('issues', []))}, "
-                       f"Warnings: {len(lambda_result.get('warnings', []))}")
-
-            return lambda_result
-
-        except Exception as e:
-            logger.error(f"DDL 스키마 검증 오류: {str(e)}")
-            return {
-                'success': False,
-                'valid': False,
-                'error': str(e)
-            }
+        return await self.lambda_client.validate_schema(
+            database_secret, database, ddl_content, region
+        )
 
     async def explain_query_lambda(
         self,
@@ -9120,56 +7709,12 @@ Knowledge Base 성능 최적화 가이드:
     ) -> dict:
         """쿼리 실행 계획 분석 (Lambda 사용)
 
-        Args:
-            database_secret: Secrets Manager secret name
-            database: 데이터베이스 이름
-            query: 분석할 쿼리
-            region: AWS 리전
-
-        Returns:
-            dict: {
-                'success': bool,
-                'query': str,
-                'explain_data': list,
-                'performance_issues': list,
-                'performance_issue_count': int,
-                'recommendations': list,
-                's3_location': str
-            }
+        리팩토링: Week 1 - LambdaClient 모듈로 위임
+        하위 호환성을 위해 메서드 유지
         """
-        try:
-            # Lambda가 database=None 처리를 담당
-            logger.info(f"Lambda로 EXPLAIN 분석: {database_secret}/{database}")
-
-            # Lambda 호출
-            lambda_result = await self._call_lambda('explain-query', {
-                'database_secret': database_secret,
-                'database': database,
-                'query': query,
-                'region': region
-            })
-
-            if not lambda_result.get('success'):
-                error_msg = lambda_result.get('error', 'Lambda 호출 실패')
-                logger.error(f"EXPLAIN 분석 실패 (Lambda): {error_msg}")
-                return {
-                    'success': False,
-                    'error': error_msg
-                }
-
-            # Lambda 결과 반환
-            logger.info(f"EXPLAIN 분석 완료 - "
-                       f"성능 이슈: {lambda_result.get('performance_issue_count', 0)}개, "
-                       f"권장사항: {len(lambda_result.get('recommendations', []))}개")
-
-            return lambda_result
-
-        except Exception as e:
-            logger.error(f"EXPLAIN 분석 오류: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
+        return await self.lambda_client.explain_query(
+            database_secret, database, query, region
+        )
 
     async def analyze_aurora_mysql_error_logs(
         self, keyword: str, start_datetime_str: str, end_datetime_str: str
@@ -9185,8 +7730,8 @@ Knowledge Base 성능 최적화 가이드:
             # AWS 클라이언트 초기화
             rds_client = boto3.client("rds", region_name=self.default_region)
 
-            # 키워드로 시크릿 리스트 가져오기 (동기 함수 사용)
-            secret_lists = self.get_secrets_by_keyword(keyword)
+            # 키워드로 시크릿 리스트 가져오기
+            secret_lists = await self.get_secrets_by_keyword(keyword)
             if not secret_lists:
                 return f"❌ '{keyword}' 키워드로 찾은 시크릿이 없습니다."
 
