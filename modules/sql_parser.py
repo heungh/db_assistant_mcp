@@ -5,6 +5,7 @@ SQL 파싱 및 타입 추출 전용 모듈
 """
 
 import re
+import sys
 import logging
 from typing import List, Dict, Any
 
@@ -299,9 +300,9 @@ class SQLParser:
         drop_index_pattern = r"DROP\s+INDEX\s+`?(\w+)`?\s+ON\s+`?(\w+)`?"
         drop_index_matches = re.findall(drop_index_pattern, ddl_content, re.IGNORECASE)
 
-        print(f"[DEBUG] DROP INDEX 파싱 - 패턴: {drop_index_pattern}")
-        print(f"[DEBUG] DROP INDEX 파싱 - 입력: {repr(ddl_content)}")
-        print(f"[DEBUG] DROP INDEX 파싱 - 결과: {drop_index_matches}")
+        print(f"[DEBUG] DROP INDEX 파싱 - 패턴: {drop_index_pattern}", file=sys.stderr)
+        print(f"[DEBUG] DROP INDEX 파싱 - 입력: {repr(ddl_content)}", file=sys.stderr)
+        print(f"[DEBUG] DROP INDEX 파싱 - 결과: {drop_index_matches}", file=sys.stderr)
 
         for index_name, table_name in drop_index_matches:
             ddl_statements.append(
@@ -311,11 +312,11 @@ class SQLParser:
                     "index_name": index_name.lower(),
                 }
             )
-            print(f"[DEBUG] DROP INDEX 구문 추가됨: {index_name} on {table_name}")
+            print(f"[DEBUG] DROP INDEX 구문 추가됨: {index_name} on {table_name}", file=sys.stderr)
 
-        print(f"[DEBUG] 전체 파싱 결과: {len(ddl_statements)}개 구문")
+        print(f"[DEBUG] 전체 파싱 결과: {len(ddl_statements)}개 구문", file=sys.stderr)
         for i, stmt in enumerate(ddl_statements):
-            print(f"[DEBUG]   [{i}] {stmt['type']}: {stmt}")
+            print(f"[DEBUG]   [{i}] {stmt['type']}: {stmt}", file=sys.stderr)
 
         return ddl_statements
 

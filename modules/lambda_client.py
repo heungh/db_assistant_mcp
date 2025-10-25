@@ -8,6 +8,7 @@ RDS/CloudWatch API 호출을 Lambda로 오프로드하여 원본 서버는 복�
 import json
 import logging
 import boto3
+from botocore.config import Config
 from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -32,8 +33,17 @@ class LambdaClient:
             region: AWS 리전
         """
         self.region = region
-        self.lambda_client = boto3.client('lambda', region_name=region)
-        logger.info(f"LambdaClient 초기화 완료 - 리전: {region}")
+
+        # VPC Lambda의 Cold Start를 고려한 타임아웃 설정
+        # VPC ENI 생성 + DB 연결 + 쿼리 실행 + 로컬 네트워크 지연을 위해 충분한 시간 확보
+        config = Config(
+            read_timeout=180,      # 읽기 타임아웃 180초 (Lambda 90초 + 여유 90초)
+            connect_timeout=30,    # 연결 타임아웃 30초 (로컬 네트워크 지연 대비)
+            retries={'max_attempts': 1}  # 재시도 없음 (MCP 서버 응답 지연 방지)
+        )
+
+        self.lambda_client = boto3.client('lambda', region_name=region, config=config)
+        logger.info(f"LambdaClient 초기화 완료 - 리전: {region}, read_timeout: 180s, connect_timeout: 30s")
 
     async def _call_lambda(self, function_name: str, payload: dict) -> dict:
         """
@@ -89,11 +99,27 @@ class LambdaClient:
             else:
                 error_msg = result.get('body', {}).get('error', 'Unknown error')
                 logger.error(f"Lambda 오류: {error_msg}")
-                raise Exception(f"Lambda 오류: {error_msg}")
+                return {
+                    'success': False,
+                    'error': f'Lambda 오류: {error_msg}'
+                }
 
         except Exception as e:
-            logger.error(f"Lambda 호출 실패 ({function_name}): {str(e)}")
-            raise
+            error_msg = str(e)
+            logger.error(f"Lambda 호출 실패 ({function_name}): {error_msg}")
+
+            # 타임아웃 에러인지 확인
+            if 'timed out' in error_msg.lower() or 'timeout' in error_msg.lower():
+                return {
+                    'success': False,
+                    'error': f'Lambda 타임아웃: VPC Cold Start로 인해 {function_name} 함수 실행이 지연되었습니다. 잠시 후 다시 시도해주세요.'
+                }
+
+            # 일반 에러
+            return {
+                'success': False,
+                'error': f'Lambda 호출 실패: {error_msg}'
+            }
 
     async def validate_schema(
         self,
