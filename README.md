@@ -19,9 +19,6 @@
 - [핵심 기능](#핵심-기능)
 - [환경 설정](#환경-설정)
 - [사용 방법](#사용-방법)
-- [리팩토링 이력](#리팩토링-이력)
-- [배포 가이드](#배포-가이드)
-- [문제 해결](#문제-해결)
 
 ---
 
@@ -143,7 +140,7 @@ graph TB
 
     subgraph AI["🤖 AWS Bedrock"]
         KB[Knowledge Base<br/>RAG 검색<br/>us-east-1]
-        Claude[Claude Sonnet 4<br/>AI 분석<br/>us-west-2]
+        Claude[Claude Sonnet 4<br/>AI 분석<br/>us-east-1]
         KB -.-> Claude
     end
 
@@ -591,7 +588,7 @@ cat > /tmp/db-assistant-policy.json << 'EOF'
         "bedrock:InvokeModelWithResponseStream"
       ],
       "Resource": [
-        "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*",
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*"
       ]
     },
@@ -869,11 +866,11 @@ aws s3 mb s3://db-assistant-query-results-dev --region ap-northeast-2
 ### 7. Bedrock 및 Knowledge Base 설정
 
 ```bash
-# Bedrock 리전: us-west-2 (Claude Sonnet 4 사용)
+# Bedrock 리전: us-east-1 (Claude Sonnet 4 사용)
 # Knowledge Base 리전: us-east-1 (Aurora MySQL 최적화 가이드)
 
 # IAM 권한은 위에서 생성한 DBAssistantRole에 이미 포함되어 있습니다:
-# - bedrock:InvokeModel (us-west-2)
+# - bedrock:InvokeModel (us-east-1)
 # - bedrock:Retrieve (us-east-1)
 ```
 
