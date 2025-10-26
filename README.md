@@ -477,7 +477,220 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. Lambda 함수 배포
+### 2. IAM Role 생성 (DBAssistantRole)
+
+DB Assistant가 사용하는 모든 AWS 서비스에 접근하기 위한 통합 IAM Role을 먼저 생성합니다. 이 역할은 **Lambda 함수**와 **EC2 인스턴스** 모두에서 사용됩니다.
+
+#### 2.1. 신뢰 관계 정책 (Trust Policy)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": [
+          "lambda.amazonaws.com",
+          "ec2.amazonaws.com"
+        ]
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+#### 2.2. IAM Policy 생성 (DBAssistantPolicy)
+
+```bash
+# Policy JSON 파일 생성
+cat > /tmp/db-assistant-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaInvoke",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:InvokeFunction",
+        "lambda:GetFunction",
+        "lambda:ListFunctions"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:db-assistant-*"
+    },
+    {
+      "Sid": "RDSAccess",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBClusters",
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBLogFiles",
+        "rds:DownloadDBLogFilePortion",
+        "rds:DescribeEvents",
+        "rds:DescribeDBSubnetGroups",
+        "rds:ModifyDBCluster"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecretsManagerAccess",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:ListSecrets"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::db-assistant-*",
+        "arn:aws:s3:::db-assistant-*/*",
+        "arn:aws:s3:::bedrockagent-hhs",
+        "arn:aws:s3:::bedrockagent-hhs/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:PutMetricData"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BedrockRuntime",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*"
+      ]
+    },
+    {
+      "Sid": "BedrockKnowledgeBase",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve",
+        "bedrock:RetrieveAndGenerate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "VPCAccess",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateNetworkInterface",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DeleteNetworkInterface",
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:UnassignPrivateIpAddresses",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+
+# IAM Policy 생성
+aws iam create-policy \
+  --policy-name DBAssistantPolicy \
+  --policy-document file:///tmp/db-assistant-policy.json \
+  --description "DB Assistant가 사용하는 모든 AWS 서비스 접근 권한"
+
+# Policy ARN 출력 (다음 단계에서 사용)
+aws iam list-policies --query 'Policies[?PolicyName==`DBAssistantPolicy`].Arn' --output text
+```
+
+#### 2.3. IAM Role 생성 및 Policy 연결
+
+```bash
+# 신뢰 관계 정책 파일 생성
+cat > /tmp/trust-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": [
+          "lambda.amazonaws.com",
+          "ec2.amazonaws.com"
+        ]
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+# IAM Role 생성
+aws iam create-role \
+  --role-name DBAssistantRole \
+  --assume-role-policy-document file:///tmp/trust-policy.json \
+  --description "DB Assistant Lambda 및 EC2 통합 역할"
+
+# 생성한 Policy 연결
+POLICY_ARN=$(aws iam list-policies --query 'Policies[?PolicyName==`DBAssistantPolicy`].Arn' --output text)
+aws iam attach-role-policy \
+  --role-name DBAssistantRole \
+  --policy-arn $POLICY_ARN
+
+# Role ARN 확인 (Lambda 배포 시 사용)
+aws iam get-role --role-name DBAssistantRole --query 'Role.Arn' --output text
+```
+
+#### 2.4. EC2 인스턴스에 Role 연결
+
+```bash
+# Instance Profile 생성
+aws iam create-instance-profile --instance-profile-name DBAssistantInstanceProfile
+
+# Role을 Instance Profile에 추가
+aws iam add-role-to-instance-profile \
+  --instance-profile-name DBAssistantInstanceProfile \
+  --role-name DBAssistantRole
+
+# EC2 인스턴스에 Instance Profile 연결
+aws ec2 associate-iam-instance-profile \
+  --instance-id i-xxxxxxxxx \
+  --iam-instance-profile Name=DBAssistantInstanceProfile
+```
+
+---
+
+### 3. Lambda 함수 배포
 
 **핵심 Lambda 함수** (수동 배포 필요):
 1. `validate_schema` - DDL 스키마 검증
@@ -485,18 +698,116 @@ pip install -r requirements.txt
 3. `get_rds_cluster_info` - RDS 메타데이터 수집
 4. `get_cloudwatch_metrics_raw` - CloudWatch 메트릭 수집
 
+#### 3.1. 처음 배포 시 (create-function)
+
 ```bash
-# Lambda 함수 배포 예시 (validate_schema)
+# 1. 배포 패키지 생성 (validate_schema 예시)
 cd lambda-functions/validate_schema
 zip -r validate_schema.zip handler.py pymysql/
 
+# 2. IAM 역할 ARN 확인 (위에서 생성한 DBAssistantRole 사용)
+ROLE_ARN=$(aws iam get-role --role-name DBAssistantRole --query 'Role.Arn' --output text)
+echo $ROLE_ARN
+
+# 3. VPC 설정 확인 (RDS 접근용)
+# Subnet IDs와 Security Group ID를 확인
+aws ec2 describe-subnets --filters "Name=tag:Name,Values=*private*" --query 'Subnets[*].[SubnetId,AvailabilityZone,Tags[?Key==`Name`].Value|[0]]' --output table
+
+aws ec2 describe-security-groups --filters "Name=tag:Name,Values=*lambda*" --query 'SecurityGroups[*].[GroupId,GroupName,VpcId]' --output table
+
+# 4. Lambda 함수 생성
+aws lambda create-function \
+  --function-name db-assistant-validate-schema-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://validate_schema.zip \
+  --timeout 300 \
+  --memory-size 256 \
+  --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
+  --environment Variables="{REGION=ap-northeast-2}" \
+  --region ap-northeast-2
+
+# 5. Lambda Layer 연결 (pymysql 등 - 선택사항)
+# 필요 시 pymysql Layer를 미리 생성해두고 연결
+aws lambda update-function-configuration \
+  --function-name db-assistant-validate-schema-dev \
+  --layers arn:aws:lambda:ap-northeast-2:YOUR_ACCOUNT_ID:layer:pymysql:1 \
+  --region ap-northeast-2
+```
+
+#### 3.2. 코드 업데이트 시 (update-function-code)
+
+```bash
+# 1. 배포 패키지 재생성
+cd lambda-functions/validate_schema
+zip -r validate_schema.zip handler.py pymysql/
+
+# 2. 코드만 업데이트 (설정은 그대로 유지)
 aws lambda update-function-code \
   --function-name db-assistant-validate-schema-dev \
   --zip-file fileb://validate_schema.zip \
   --region ap-northeast-2
 ```
 
-### 3. AWS Credentials 설정
+#### 3.3. 다른 핵심 함수 배포
+
+위와 동일한 방식으로 다른 핵심 함수들도 배포합니다:
+
+```bash
+# IAM Role ARN 확인
+ROLE_ARN=$(aws iam get-role --role-name DBAssistantRole --query 'Role.Arn' --output text)
+
+# explain_query
+cd lambda-functions/explain_query
+zip -r explain_query.zip handler.py pymysql/
+aws lambda create-function \
+  --function-name db-assistant-explain-query-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://explain_query.zip \
+  --timeout 300 \
+  --memory-size 256 \
+  --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
+  --environment Variables="{REGION=ap-northeast-2}" \
+  --region ap-northeast-2
+
+# get_rds_cluster_info
+cd lambda-functions/get_rds_cluster_info
+zip -r get_rds_cluster_info.zip handler.py
+aws lambda create-function \
+  --function-name db-assistant-get-rds-cluster-info-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://get_rds_cluster_info.zip \
+  --timeout 300 \
+  --memory-size 256 \
+  --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
+  --environment Variables="{REGION=ap-northeast-2}" \
+  --region ap-northeast-2
+
+# get_cloudwatch_metrics_raw
+cd lambda-functions/get_cloudwatch_metrics_raw
+zip -r get_cloudwatch_metrics_raw.zip handler.py
+aws lambda create-function \
+  --function-name db-assistant-get-cloudwatch-metrics-raw-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://get_cloudwatch_metrics_raw.zip \
+  --timeout 300 \
+  --memory-size 512 \
+  --environment Variables="{REGION=ap-northeast-2}" \
+  --region ap-northeast-2
+```
+
+**참고**: `get_cloudwatch_metrics_raw`는 RDS에 직접 연결하지 않으므로 VPC 설정이 필요 없습니다.
+
+---
+
+### 4. AWS Credentials 설정
 
 ```bash
 # AWS credentials 구성
@@ -517,7 +828,7 @@ aws secretsmanager create-secret \
   --region ap-northeast-2
 ```
 
-### 4. Amazon Q CLI 설정
+### 5. Amazon Q CLI 설정
 
 ```bash
 # MCP 설정 파일 생성
@@ -545,7 +856,7 @@ cat > ~/.aws/amazonq/mcp.json << 'EOF'
 EOF
 ```
 
-### 5. S3 버킷 생성
+### 6. S3 버킷 생성
 
 ```bash
 # 리포트 저장용 S3 버킷 생성
@@ -555,20 +866,22 @@ aws s3 mb s3://db-assistant-reports --region ap-northeast-2
 aws s3 mb s3://db-assistant-query-results-dev --region ap-northeast-2
 ```
 
-### 6. Bedrock 및 Knowledge Base 설정
+### 7. Bedrock 및 Knowledge Base 설정
 
 ```bash
 # Bedrock 리전: us-west-2 (Claude Sonnet 4 사용)
 # Knowledge Base 리전: us-east-1 (Aurora MySQL 최적화 가이드)
 
-# IAM 권한 확인 (EC2 인스턴스 롤 또는 사용자 권한)
+# IAM 권한은 위에서 생성한 DBAssistantRole에 이미 포함되어 있습니다:
 # - bedrock:InvokeModel (us-west-2)
-# - bedrock-agent:Retrieve (us-east-1)
+# - bedrock:Retrieve (us-east-1)
 ```
 
 **Knowledge Base ID 설정**:
 - Knowledge Base ID는 `utils/constants.py`에서 `KNOWLEDGE_BASE_ID` 변수로 관리됩니다
 - 실제 Knowledge Base를 생성한 후 ID를 업데이트해야 합니다
+
+**참고**: Bedrock 및 Knowledge Base 권한은 위에서 생성한 **DBAssistantRole**에 이미 포함되어 있으므로 추가 설정이 필요 없습니다
 
 ---
 
