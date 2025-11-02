@@ -518,9 +518,9 @@ QUERY_RESULTS_BUCKET=your-production-bucket
 QUERY_RESULTS_DEV_BUCKET=your-dev-bucket
 BEDROCK_AGENT_BUCKET=your-bedrock-bucket
 
-# AWS Region Configuration
+# AWS Region Configuration ( 임의로 설정한 부분이므로 환경에 맞춰서 변경)
 AWS_DEFAULT_REGION=ap-northeast-2
-BEDROCK_REGION=us-west-2
+BEDROCK_REGION=us-east-1
 KNOWLEDGE_BASE_REGION=us-east-1
 
 # Environment
@@ -549,6 +549,8 @@ aws lambda update-function-configuration \
 3. Edit 클릭
 4. `QUERY_RESULTS_BUCKET` 추가 및 값 입력
 5. Save
+
+람다함수를 MCP에 반영할때 주의사항: 람다 실행시간 및 QCli의 Timeout부분을 충분히 늘려줘야 합니다. 그렇지 않으면 정상적으로 호출했으나 타임아웃 제한에 걸리는 문제가 발생합니다.
 
 ### 2. IAM Role 생성 (DBAssistantRole)
 
