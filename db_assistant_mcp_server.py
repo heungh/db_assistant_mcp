@@ -7343,7 +7343,7 @@ Knowledge Base 성능 최적화 가이드:
                 try:
                     import boto3
                     s3_client = boto3.client('s3', region_name=self.default_region)
-                    s3_bucket = "db-assistant-query-results-dev"
+                    s3_bucket = QUERY_RESULTS_DEV_BUCKET
                     s3_key = f"sql-files/slow-queries/{filename}"
 
                     s3_client.upload_file(str(file_path), s3_bucket, s3_key)
@@ -7502,7 +7502,7 @@ Knowledge Base 성능 최적화 가이드:
                 try:
                     import boto3
                     s3_client = boto3.client('s3', region_name=self.default_region)
-                    s3_bucket = "db-assistant-query-results-dev"
+                    s3_bucket = QUERY_RESULTS_DEV_BUCKET
                     s3_key = f"sql-files/cpu-intensive/{filename}"
 
                     s3_client.upload_file(str(file_path), s3_bucket, s3_key)
@@ -7578,7 +7578,7 @@ Knowledge Base 성능 최적화 가이드:
                 try:
                     import boto3
                     s3_client = boto3.client('s3', region_name=self.default_region)
-                    s3_bucket = "db-assistant-query-results-dev"
+                    s3_bucket = QUERY_RESULTS_DEV_BUCKET
                     s3_key = f"sql-files/temp-intensive/{filename}"
 
                     s3_client.upload_file(str(file_path), s3_bucket, s3_key)
@@ -8752,7 +8752,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
             # 파일 존재 여부 및 메타데이터 확인
             try:
-                response = s3_client.head_object(Bucket="bedrockagent-hhs", Key=s3_key)
+                response = s3_client.head_object(Bucket=BEDROCK_AGENT_BUCKET, Key=s3_key)
 
                 # 메타데이터에서 버전 정보 추출
                 metadata = response.get("Metadata", {})
