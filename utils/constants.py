@@ -68,7 +68,7 @@ KNOWLEDGE_BASE_REGION = "us-east-1"
 # Knowledge Base 설정
 # ============================================================================
 
-KNOWLEDGE_BASE_ID = "0WQUBRHVR8"
+KNOWLEDGE_BASE_ID = "<your knowledgebase id>"
 
 
 # ============================================================================
