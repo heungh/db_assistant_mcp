@@ -51,52 +51,13 @@
 
 프로젝트의 주요 기능과 사용법을 영상으로 확인하세요.
 
-### 1. 📝 SQL 검증
-**DDL 스키마 검증 및 분석**
-- DDL 문법 검증
-- 스키마 구조 분석
-- 테이블 및 인덱스 검증
-- S3 저장 및 결과 확인
+1. [**SQL 검증**](https://www.youtube.com/watch?v=2BuMIutiUEY) - DDL 스키마 검증, 문법 체크 및 S3 저장
+2. [**슬로우쿼리 수집 및 분석**](https://www.youtube.com/watch?v=XfisOWzUm5Y) - Performance Schema 기반 쿼리 성능 분석
+3. [**메트릭 수집 및 분석**](https://www.youtube.com/watch?v=FZ7TZjS03FE) - CloudWatch 메트릭 수집 및 CSV 리포트 생성
+4. [**성능분석 및 벡터 저장**](https://www.youtube.com/watch?v=Zt3X8I6oqu4) - AI 기반 성능 분석 및 Knowledge Base RAG
+5. [**장애이력 불러오기**](https://www.youtube.com/watch?v=enckshfYsSQ) - RDS 이벤트 및 CloudWatch Logs 분석
 
-[![SQL 검증](https://img.youtube.com/vi/2BuMIutiUEY/0.jpg)](https://www.youtube.com/watch?v=2BuMIutiUEY)
-
-### 2. 🐌 슬로우쿼리 수집 및 분석
-**Performance Schema 기반 슬로우 쿼리 탐지**
-- Slow Query 자동 수집
-- 쿼리 실행 시간 분석
-- 병목 지점 파악
-- 최적화 권장사항
-
-[![슬로우쿼리 수집 및 분석](https://img.youtube.com/vi/XfisOWzUm5Y/0.jpg)](https://www.youtube.com/watch?v=XfisOWzUm5Y)
-
-### 3. 📊 메트릭 수집 및 분석
-**CloudWatch 메트릭 기반 성능 모니터링**
-- CPU, 메모리, I/O 메트릭 수집
-- 데이터 포인트 분석
-- 상관관계 분석
-- CSV 리포트 생성
-
-[![메트릭 수집 및 분석](https://img.youtube.com/vi/FZ7TZjS03FE/0.jpg)](https://www.youtube.com/watch?v=FZ7TZjS03FE)
-
-### 4. 🤖 성능분석 및 벡터 저장
-**AI 기반 성능 분석 및 Knowledge Base 통합**
-- Bedrock Claude를 활용한 성능 분석
-- Knowledge Base RAG 검색
-- 최적화 권장사항 생성
-- 벡터 저장소에 분석 결과 저장
-
-[![성능분석 및 벡터 저장](https://img.youtube.com/vi/Zt3X8I6oqu4/0.jpg)](https://www.youtube.com/watch?v=Zt3X8I6oqu4)
-
-### 5. 🚨 장애이력 불러오기
-**RDS 이벤트 및 로그 수집**
-- RDS 클러스터 이벤트 조회
-- CloudWatch Logs 분석
-- 장애 패턴 탐지
-- 이력 관리 및 리포팅
-
-[![장애이력 불러오기](https://img.youtube.com/vi/enckshfYsSQ/0.jpg)](https://www.youtube.com/watch?v=enckshfYsSQ)
-
-> **플레이리스트**: 전체 영상을 순서대로 보려면 [여기](https://www.youtube.com/playlist?list=PLtrKveME8VY4itt6VAhR0ZyyWDj21d8Bx)를 클릭하세요.
+📌 **전체 플레이리스트**: https://www.youtube.com/playlist?list=PLtrKveME8VY4itt6VAhR0ZyyWDj21d8Bx
 
 ---
 
