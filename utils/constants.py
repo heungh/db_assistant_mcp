@@ -4,6 +4,7 @@
 애플리케이션 전역에서 사용되는 상수 값들을 정의합니다.
 """
 
+import os
 from pathlib import Path
 
 # ============================================================================
@@ -59,16 +60,26 @@ DEFAULT_METRICS = [
 # AWS 리전 설정
 # ============================================================================
 
-DEFAULT_REGION = "ap-northeast-2"
-BEDROCK_REGION = "us-west-2"
-KNOWLEDGE_BASE_REGION = "us-east-1"
+DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-west-2")
+KNOWLEDGE_BASE_REGION = os.getenv("KNOWLEDGE_BASE_REGION", "us-east-1")
 
 
 # ============================================================================
 # Knowledge Base 설정
 # ============================================================================
 
-KNOWLEDGE_BASE_ID = "<your knowledgebase id>"
+KNOWLEDGE_BASE_ID = os.getenv("KNOWLEDGE_BASE_ID", "<your knowledgebase id>")
+DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID", "<your data source id>")
+
+
+# ============================================================================
+# S3 버킷 설정
+# ============================================================================
+
+QUERY_RESULTS_BUCKET = os.getenv("QUERY_RESULTS_BUCKET", "db-assistant-query-results")
+QUERY_RESULTS_DEV_BUCKET = os.getenv("QUERY_RESULTS_DEV_BUCKET", "db-assistant-query-results-dev")
+BEDROCK_AGENT_BUCKET = os.getenv("BEDROCK_AGENT_BUCKET", "bedrockagent-hhs")
 
 
 # ============================================================================

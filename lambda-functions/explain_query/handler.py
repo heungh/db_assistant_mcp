@@ -5,6 +5,7 @@ Lambda Function: explain_query
 
 import json
 import logging
+import os
 from typing import Dict, Any
 from datetime import datetime
 
@@ -14,7 +15,7 @@ import pymysql
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-S3_BUCKET = 'db-assistant-query-results'
+S3_BUCKET = os.getenv('QUERY_RESULTS_BUCKET', 'db-assistant-query-results')
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

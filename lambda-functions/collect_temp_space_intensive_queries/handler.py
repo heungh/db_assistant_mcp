@@ -5,6 +5,7 @@ Performance Schema에서 Temp 공간 집약적 쿼리 수집 및 S3 저장
 
 import json
 import logging
+import os
 from typing import Dict, Any, List
 from datetime import datetime
 import boto3
@@ -13,7 +14,7 @@ import pymysql
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-S3_BUCKET = 'db-assistant-query-results'
+S3_BUCKET = os.getenv('QUERY_RESULTS_BUCKET', 'db-assistant-query-results')
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

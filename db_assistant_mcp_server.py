@@ -68,6 +68,10 @@ from utils.constants import (
     BEDROCK_REGION,
     KNOWLEDGE_BASE_REGION,
     KNOWLEDGE_BASE_ID,
+    DATA_SOURCE_ID,
+    QUERY_RESULTS_BUCKET,
+    QUERY_RESULTS_DEV_BUCKET,
+    BEDROCK_AGENT_BUCKET,
 )
 from utils.parsers import (
     parse_table_name,
@@ -7069,7 +7073,7 @@ Knowledge Base 성능 최적화 가이드:
                     try:
                         import boto3
                         s3_client = boto3.client('s3', region_name=self.default_region)
-                        s3_bucket = "db-assistant-query-results-dev"
+                        s3_bucket = QUERY_RESULTS_DEV_BUCKET
                         s3_key = f"sql-files/slow-queries/{filename}"
 
                         s3_client.upload_file(str(file_path), s3_bucket, s3_key)
@@ -7230,7 +7234,7 @@ Knowledge Base 성능 최적화 가이드:
                     try:
                         import boto3
                         s3_client = boto3.client('s3', region_name=self.default_region)
-                        s3_bucket = "db-assistant-query-results-dev"
+                        s3_bucket = QUERY_RESULTS_DEV_BUCKET
                         s3_key = f"sql-files/slow-queries/{filename}"
 
                         s3_client.upload_file(str(file_path), s3_bucket, s3_key)
@@ -8158,7 +8162,7 @@ version: "{new_version}"
 last_updated: "{datetime.now().strftime('%Y-%m-%d')}"
 author: "DB Assistant"
 source: "conversation"
-s3_path: "s3://bedrockagent-hhs/{s3_key}"
+s3_path: "s3://{BEDROCK_AGENT_BUCKET}/{s3_key}"
 similarity_checked: true
 ---
 
@@ -8177,7 +8181,7 @@ similarity_checked: true
 
             s3_client.upload_file(
                 local_path,
-                "bedrockagent-hhs",
+                BEDROCK_AGENT_BUCKET,
                 s3_key,
                 ExtraArgs={
                     "ContentType": "text/markdown",
@@ -8222,7 +8226,7 @@ similarity_checked: true
             return f"""✅ 벡터 저장소에 저장 완료!
 
 📁 로컬 저장: {local_path}
-☁️ S3 저장: s3://bedrockagent-hhs/{s3_key}
+☁️ S3 저장: s3://{BEDROCK_AGENT_BUCKET}/{s3_key}
 🏷️ 카테고리: {category}
 📝 버전: {new_version} {"(업데이트)" if version_info["exists"] else "(신규)"}
 🔖 태그: {', '.join(metadata_tags)}{storage_info}
@@ -8511,13 +8515,13 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
             s3_client = boto3.client("s3", region_name="us-east-1")
             s3_client.put_object(
-                Bucket="bedrockagent-hhs",
+                Bucket=BEDROCK_AGENT_BUCKET,
                 Key=s3_key,
                 Body=content.encode("utf-8"),
                 ContentType="text/markdown",
             )
 
-            s3_path = f"s3://bedrockagent-hhs/{s3_key}"
+            s3_path = f"s3://{BEDROCK_AGENT_BUCKET}/{s3_key}"
             logger.info(f"전체 내용 S3 저장: {s3_path}")
             return s3_path
 
@@ -8624,7 +8628,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
             )
 
             response = bedrock_agent_client.start_ingestion_job(
-                knowledgeBaseId="0WQUBRHVR8", dataSourceId="A8VCUHOHEQ"
+                knowledgeBaseId=KNOWLEDGE_BASE_ID, dataSourceId=DATA_SOURCE_ID
             )
 
             job_id = response["ingestionJob"]["ingestionJobId"]
@@ -8654,7 +8658,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
             # Knowledge Base에서 검색
             response = bedrock_agent_runtime.retrieve(
-                knowledgeBaseId="0WQUBRHVR8",
+                knowledgeBaseId=KNOWLEDGE_BASE_ID,
                 retrievalQuery={"text": query},
                 retrievalConfiguration={
                     "vectorSearchConfiguration": {"numberOfResults": max_results}
@@ -8863,7 +8867,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
 
             s3_client.upload_file(
                 local_path,
-                "bedrockagent-hhs",
+                BEDROCK_AGENT_BUCKET,
                 s3_key,
                 ExtraArgs={"ContentType": "text/markdown"},
             )
@@ -8876,7 +8880,7 @@ CONFLICT_DETAILS: 상충되는 내용 설명 (상충이 있을 경우만)"""
             return f"""✅ 벡터 저장소 문서 업데이트 완료!
 
 📁 로컬 파일: {local_path}
-☁️ S3 파일: s3://bedrockagent-hhs/{s3_key}
+☁️ S3 파일: s3://{BEDROCK_AGENT_BUCKET}/{s3_key}
 🔄 업데이트 모드: {update_mode}
 📝 업데이트 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 

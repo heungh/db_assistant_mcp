@@ -20,6 +20,9 @@ try:
 except ImportError:
     ANALYSIS_AVAILABLE = False
 
+# 상수 import
+from utils.constants import QUERY_RESULTS_DEV_BUCKET
+
 logger = logging.getLogger(__name__)
 
 # 디렉토리 경로
@@ -178,7 +181,7 @@ class CloudWatchManager:
             pivot_df.to_csv(csv_file)
 
             # S3에 업로드
-            s3_bucket = "db-assistant-query-results-dev"
+            s3_bucket = QUERY_RESULTS_DEV_BUCKET
             s3_key = f"metrics/{db_instance_identifier}/{csv_filename}"
 
             try:

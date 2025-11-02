@@ -451,6 +451,25 @@ result = await server.validate_sql_files(
 
 ## 환경 설정
 
+### Prerequisites
+
+#### 시스템 요구사항
+- **Python 버전**: Python 3.11 이상 (권장: Python 3.11+)
+- **운영체제**: Linux (Amazon Linux 2023, Ubuntu 20.04+), macOS
+- **메모리**: 최소 4GB RAM (권장: 8GB+)
+- **디스크**: 10GB 이상 여유 공간
+
+#### 필수 Python 패키지
+다음 패키지들이 필요합니다:
+- **boto3** (>=1.34.0) - AWS SDK
+- **pymysql** (>=1.1.0) - MySQL 데이터베이스 연결
+- **pandas** (>=2.2.0) - 데이터 분석
+- **numpy** (>=1.26.0) - 수치 연산
+- **matplotlib** (>=3.8.0) - 데이터 시각화
+- **scikit-learn** (>=1.4.0) - 머신러닝 분석
+- **sqlparse** (>=0.4.4) - SQL 파싱
+- **mcp** (>=0.9.0) - Model Context Protocol
+
 ### 1. EC2 인스턴스 설정
 
 ```bash
@@ -461,9 +480,11 @@ ssh -i your-key.pem ec2-user@your-ec2-ip
 sudo yum update -y
 sudo yum install -y python3.11 python3.11-pip git
 
-# 프로젝트 디렉토리 생성
+# 프로젝트 디렉토리 생성 및 클론
 mkdir -p ~/db-assistant
 cd ~/db-assistant
+git clone https://github.com/heungh/db_assistant_mcp.git
+cd db_assistant_mcp
 
 # 가상환경 생성 및 활성화
 python3.11 -m venv venv
@@ -473,6 +494,61 @@ source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+### 1.5. 환경 변수 설정
+
+`.env.example` 파일을 복사하여 `.env` 파일을 생성하고 실제 값을 입력합니다:
+
+```bash
+# .env 파일 생성
+cp .env.example .env
+
+# .env 파일 편집
+vi .env
+```
+
+`.env` 파일 예시:
+```bash
+# AWS Bedrock Configuration
+KNOWLEDGE_BASE_ID=your-actual-knowledge-base-id
+DATA_SOURCE_ID=your-actual-data-source-id
+
+# AWS S3 Bucket Configuration
+QUERY_RESULTS_BUCKET=your-production-bucket
+QUERY_RESULTS_DEV_BUCKET=your-dev-bucket
+BEDROCK_AGENT_BUCKET=your-bedrock-bucket
+
+# AWS Region Configuration
+AWS_DEFAULT_REGION=ap-northeast-2
+BEDROCK_REGION=us-west-2
+KNOWLEDGE_BASE_REGION=us-east-1
+
+# Environment
+ENVIRONMENT=production
+SSL_VERIFY=true
+```
+
+**중요**: `.env` 파일은 절대 Git에 커밋하지 마세요! (`.gitignore`에 이미 포함되어 있음)
+
+### 1.6. Lambda 함수 환경 변수 설정
+
+각 Lambda 함수에도 환경 변수를 설정해야 합니다:
+
+```bash
+# AWS CLI를 통한 Lambda 환경 변수 설정 예시
+aws lambda update-function-configuration \
+  --function-name collect-cpu-intensive-queries \
+  --environment Variables="{QUERY_RESULTS_BUCKET=your-bucket-name}"
+
+# 다른 Lambda 함수들도 동일하게 설정
+```
+
+또는 AWS 콘솔에서:
+1. Lambda > Functions > [함수 선택]
+2. Configuration > Environment variables
+3. Edit 클릭
+4. `QUERY_RESULTS_BUCKET` 추가 및 값 입력
+5. Save
 
 ### 2. IAM Role 생성 (DBAssistantRole)
 

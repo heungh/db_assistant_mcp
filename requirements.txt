@@ -1,0 +1,28 @@
+# Core AWS SDK
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Database Connectivity
+pymysql>=1.1.0
+mysql-connector-python>=8.3.0
+
+# Data Analysis and Processing
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+
+# Data Visualization
+matplotlib>=3.8.0
+
+# SQL Parsing and Formatting
+sqlparse>=0.4.4
+
+# MCP (Model Context Protocol) Server
+mcp>=0.9.0
+
+# Logging and Utilities
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# Optional: Environment Management
+python-dotenv>=1.0.0
