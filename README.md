@@ -13,6 +13,7 @@
 ## 목차
 
 - [개요](#개요)
+- [📺 데모 및 튜토리얼 영상](#-데모-및-튜토리얼-영상)
 - [주요 특징](#주요-특징)
 - [아키텍처](#아키텍처)
 - [프로젝트 구조](#프로젝트-구조)
@@ -43,6 +44,59 @@
 - Aurora 클러스터 전체의 부하 분산 및 레플리케이션 상태 모니터링
 - CPU, 메모리, I/O, 커넥션 등 다차원 성능 분석
 - SQL 스키마 검증 및 쿼리 실행 계획 분석
+
+---
+
+## 📺 데모 및 튜토리얼 영상
+
+프로젝트의 주요 기능과 사용법을 영상으로 확인하세요.
+
+### 1. 📝 SQL 검증
+**DDL 스키마 검증 및 분석**
+- DDL 문법 검증
+- 스키마 구조 분석
+- 테이블 및 인덱스 검증
+- S3 저장 및 결과 확인
+
+[![SQL 검증](https://img.youtube.com/vi/2BuMIutiUEY/0.jpg)](https://www.youtube.com/watch?v=2BuMIutiUEY)
+
+### 2. 🐌 슬로우쿼리 수집 및 분석
+**Performance Schema 기반 슬로우 쿼리 탐지**
+- Slow Query 자동 수집
+- 쿼리 실행 시간 분석
+- 병목 지점 파악
+- 최적화 권장사항
+
+[![슬로우쿼리 수집 및 분석](https://img.youtube.com/vi/XfisOWzUm5Y/0.jpg)](https://www.youtube.com/watch?v=XfisOWzUm5Y)
+
+### 3. 📊 메트릭 수집 및 분석
+**CloudWatch 메트릭 기반 성능 모니터링**
+- CPU, 메모리, I/O 메트릭 수집
+- 데이터 포인트 분석
+- 상관관계 분석
+- CSV 리포트 생성
+
+[![메트릭 수집 및 분석](https://img.youtube.com/vi/FZ7TZjS03FE/0.jpg)](https://www.youtube.com/watch?v=FZ7TZjS03FE)
+
+### 4. 🤖 성능분석 및 벡터 저장
+**AI 기반 성능 분석 및 Knowledge Base 통합**
+- Bedrock Claude를 활용한 성능 분석
+- Knowledge Base RAG 검색
+- 최적화 권장사항 생성
+- 벡터 저장소에 분석 결과 저장
+
+[![성능분석 및 벡터 저장](https://img.youtube.com/vi/Zt3X8I6oqu4/0.jpg)](https://www.youtube.com/watch?v=Zt3X8I6oqu4)
+
+### 5. 🚨 장애이력 불러오기
+**RDS 이벤트 및 로그 수집**
+- RDS 클러스터 이벤트 조회
+- CloudWatch Logs 분석
+- 장애 패턴 탐지
+- 이력 관리 및 리포팅
+
+[![장애이력 불러오기](https://img.youtube.com/vi/enckshfYsSQ/0.jpg)](https://www.youtube.com/watch?v=enckshfYsSQ)
+
+> **플레이리스트**: 전체 영상을 순서대로 보려면 [여기](https://www.youtube.com/playlist?list=PLtrKveME8VY4itt6VAhR0ZyyWDj21d8Bx)를 클릭하세요.
 
 ---
 
@@ -518,9 +572,9 @@ QUERY_RESULTS_BUCKET=your-production-bucket
 QUERY_RESULTS_DEV_BUCKET=your-dev-bucket
 BEDROCK_AGENT_BUCKET=your-bedrock-bucket
 
-# AWS Region Configuration ( 임의로 설정한 부분이므로 환경에 맞춰서 변경)
+# AWS Region Configuration
 AWS_DEFAULT_REGION=ap-northeast-2
-BEDROCK_REGION=us-east-1
+BEDROCK_REGION=us-west-2
 KNOWLEDGE_BASE_REGION=us-east-1
 
 # Environment
@@ -549,8 +603,6 @@ aws lambda update-function-configuration \
 3. Edit 클릭
 4. `QUERY_RESULTS_BUCKET` 추가 및 값 입력
 5. Save
-
-람다함수를 MCP에 반영할때 주의사항: 람다 실행시간 및 QCli의 Timeout부분을 충분히 늘려줘야 합니다. 그렇지 않으면 정상적으로 호출했으나 타임아웃 제한에 걸리는 문제가 발생합니다.
 
 ### 2. IAM Role 생성 (DBAssistantRole)
 
