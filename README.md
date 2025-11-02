@@ -817,32 +817,110 @@ aws ec2 associate-iam-instance-profile \
 
 ---
 
-### 3. Lambda 함수 배포
+### 3. Lambda Layer 생성 (권장)
+
+Lambda 함수들이 공통으로 사용하는 패키지(pymysql 등)를 Lambda Layer로 생성하면 배포가 간편해집니다.
+
+#### 3.1. pymysql Lambda Layer 생성
+
+```bash
+# 1. Layer 디렉토리 구조 생성
+mkdir -p lambda-layer/python
+cd lambda-layer
+
+# 2. pymysql 설치
+pip install pymysql -t python/
+
+# 3. Layer 패키지 압축
+zip -r pymysql-layer.zip python/
+
+# 4. Lambda Layer 생성
+aws lambda publish-layer-version \
+  --layer-name pymysql-layer \
+  --description "PyMySQL library for Lambda functions" \
+  --zip-file fileb://pymysql-layer.zip \
+  --compatible-runtimes python3.11 python3.12 \
+  --region ap-northeast-2
+
+# 5. Layer ARN 저장 (출력된 LayerVersionArn 복사)
+# 예: arn:aws:lambda:ap-northeast-2:123456789012:layer:pymysql-layer:1
+```
+
+#### 3.2. Layer ARN 확인
+
+```bash
+# 생성된 Layer 목록 확인
+aws lambda list-layers --region ap-northeast-2
+
+# 특정 Layer의 버전 확인
+aws lambda list-layer-versions \
+  --layer-name pymysql-layer \
+  --region ap-northeast-2
+```
+
+**Layer ARN을 환경 변수로 저장** (이후 Lambda 함수 생성 시 사용):
+```bash
+export PYMYSQL_LAYER_ARN="arn:aws:lambda:ap-northeast-2:YOUR_ACCOUNT_ID:layer:pymysql-layer:1"
+echo $PYMYSQL_LAYER_ARN
+```
+
+---
+
+### 4. Lambda 함수 배포
 
 **핵심 Lambda 함수** (수동 배포 필요):
 1. `validate_schema` - DDL 스키마 검증
 2. `explain_query` - 쿼리 실행 계획 분석
 3. `get_rds_cluster_info` - RDS 메타데이터 수집
 4. `get_cloudwatch_metrics_raw` - CloudWatch 메트릭 수집
+5. `collect_cpu_intensive_queries` - CPU 집약적 쿼리 수집
+6. `collect_temp_space_intensive_queries` - Temp 공간 집약적 쿼리 수집
 
-#### 3.1. 처음 배포 시 (create-function)
+#### 4.1. 처음 배포 시 (create-function)
+
+**방법 1: Lambda Layer 사용 (권장)**
+
+Lambda Layer를 사용하면 pymysql을 포함하지 않아도 되므로 배포 패키지가 가벼워집니다.
 
 ```bash
-# 1. 배포 패키지 생성 (validate_schema 예시)
+# 1. 배포 패키지 생성 (validate_schema 예시 - handler.py만 포함)
 cd lambda-functions/validate_schema
-zip -r validate_schema.zip handler.py pymysql/
+zip validate_schema.zip handler.py
 
-# 2. IAM 역할 ARN 확인 (위에서 생성한 DBAssistantRole 사용)
+# 2. IAM 역할 ARN 확인
 ROLE_ARN=$(aws iam get-role --role-name DBAssistantRole --query 'Role.Arn' --output text)
 echo $ROLE_ARN
 
 # 3. VPC 설정 확인 (RDS 접근용)
-# Subnet IDs와 Security Group ID를 확인
-aws ec2 describe-subnets --filters "Name=tag:Name,Values=*private*" --query 'Subnets[*].[SubnetId,AvailabilityZone,Tags[?Key==`Name`].Value|[0]]' --output table
+aws ec2 describe-subnets --filters "Name=tag:Name,Values=*private*" \
+  --query 'Subnets[*].[SubnetId,AvailabilityZone,Tags[?Key==`Name`].Value|[0]]' --output table
 
-aws ec2 describe-security-groups --filters "Name=tag:Name,Values=*lambda*" --query 'SecurityGroups[*].[GroupId,GroupName,VpcId]' --output table
+aws ec2 describe-security-groups --filters "Name=tag:Name,Values=*lambda*" \
+  --query 'SecurityGroups[*].[GroupId,GroupName,VpcId]' --output table
 
-# 4. Lambda 함수 생성
+# 4. Lambda 함수 생성 (Layer와 함께)
+aws lambda create-function \
+  --function-name db-assistant-validate-schema-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://validate_schema.zip \
+  --timeout 300 \
+  --memory-size 256 \
+  --layers $PYMYSQL_LAYER_ARN \
+  --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
+  --environment Variables="{QUERY_RESULTS_BUCKET=db-assistant-query-results}" \
+  --region ap-northeast-2
+```
+
+**방법 2: pymysql 직접 포함 (Layer 없이)**
+
+```bash
+# 1. 배포 패키지 생성 (pymysql 포함)
+cd lambda-functions/validate_schema
+zip -r validate_schema.zip handler.py package/
+
+# 2. Lambda 함수 생성 (Layer 없이)
 aws lambda create-function \
   --function-name db-assistant-validate-schema-dev \
   --runtime python3.11 \
@@ -852,42 +930,51 @@ aws lambda create-function \
   --timeout 300 \
   --memory-size 256 \
   --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
-  --environment Variables="{REGION=ap-northeast-2}" \
-  --region ap-northeast-2
-
-# 5. Lambda Layer 연결 (pymysql 등 - 선택사항)
-# 필요 시 pymysql Layer를 미리 생성해두고 연결
-aws lambda update-function-configuration \
-  --function-name db-assistant-validate-schema-dev \
-  --layers arn:aws:lambda:ap-northeast-2:YOUR_ACCOUNT_ID:layer:pymysql:1 \
+  --environment Variables="{QUERY_RESULTS_BUCKET=db-assistant-query-results}" \
   --region ap-northeast-2
 ```
 
-#### 3.2. 코드 업데이트 시 (update-function-code)
+#### 4.2. 코드 업데이트 시 (update-function-code)
 
+**Layer 사용 시:**
 ```bash
-# 1. 배포 패키지 재생성
+# 1. 배포 패키지 재생성 (handler.py만)
 cd lambda-functions/validate_schema
-zip -r validate_schema.zip handler.py pymysql/
+zip validate_schema.zip handler.py
 
-# 2. 코드만 업데이트 (설정은 그대로 유지)
+# 2. 코드만 업데이트
 aws lambda update-function-code \
   --function-name db-assistant-validate-schema-dev \
   --zip-file fileb://validate_schema.zip \
   --region ap-northeast-2
 ```
 
-#### 3.3. 다른 핵심 함수 배포
+**Layer 미사용 시:**
+```bash
+# 1. 배포 패키지 재생성 (pymysql 포함)
+cd lambda-functions/validate_schema
+zip -r validate_schema.zip handler.py package/
 
-위와 동일한 방식으로 다른 핵심 함수들도 배포합니다:
+# 2. 코드 업데이트
+aws lambda update-function-code \
+  --function-name db-assistant-validate-schema-dev \
+  --zip-file fileb://validate_schema.zip \
+  --region ap-northeast-2
+```
+
+#### 4.3. 다른 핵심 함수 배포
+
+위와 동일한 방식으로 다른 핵심 함수들도 배포합니다.
+
+**pymysql 필요 함수 (Layer 사용 권장):**
 
 ```bash
 # IAM Role ARN 확인
 ROLE_ARN=$(aws iam get-role --role-name DBAssistantRole --query 'Role.Arn' --output text)
 
-# explain_query
+# explain_query (Layer 사용)
 cd lambda-functions/explain_query
-zip -r explain_query.zip handler.py pymysql/
+zip explain_query.zip handler.py
 aws lambda create-function \
   --function-name db-assistant-explain-query-dev \
   --runtime python3.11 \
@@ -896,13 +983,50 @@ aws lambda create-function \
   --zip-file fileb://explain_query.zip \
   --timeout 300 \
   --memory-size 256 \
+  --layers $PYMYSQL_LAYER_ARN \
   --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
-  --environment Variables="{REGION=ap-northeast-2}" \
+  --environment Variables="{QUERY_RESULTS_BUCKET=db-assistant-query-results}" \
   --region ap-northeast-2
 
-# get_rds_cluster_info
+# collect_cpu_intensive_queries (Layer 사용)
+cd lambda-functions/collect_cpu_intensive_queries
+zip collect_cpu_intensive_queries.zip handler.py
+aws lambda create-function \
+  --function-name db-assistant-collect-cpu-intensive-queries-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://collect_cpu_intensive_queries.zip \
+  --timeout 300 \
+  --memory-size 256 \
+  --layers $PYMYSQL_LAYER_ARN \
+  --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
+  --environment Variables="{QUERY_RESULTS_BUCKET=db-assistant-query-results}" \
+  --region ap-northeast-2
+
+# collect_temp_space_intensive_queries (Layer 사용)
+cd lambda-functions/collect_temp_space_intensive_queries
+zip collect_temp_space_intensive_queries.zip handler.py
+aws lambda create-function \
+  --function-name db-assistant-collect-temp-intensive-queries-dev \
+  --runtime python3.11 \
+  --role $ROLE_ARN \
+  --handler handler.lambda_handler \
+  --zip-file fileb://collect_temp_space_intensive_queries.zip \
+  --timeout 300 \
+  --memory-size 256 \
+  --layers $PYMYSQL_LAYER_ARN \
+  --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
+  --environment Variables="{QUERY_RESULTS_BUCKET=db-assistant-query-results}" \
+  --region ap-northeast-2
+```
+
+**pymysql 불필요 함수 (Layer 없이):**
+
+```bash
+# get_rds_cluster_info (boto3만 사용)
 cd lambda-functions/get_rds_cluster_info
-zip -r get_rds_cluster_info.zip handler.py
+zip get_rds_cluster_info.zip handler.py
 aws lambda create-function \
   --function-name db-assistant-get-rds-cluster-info-dev \
   --runtime python3.11 \
@@ -912,12 +1036,11 @@ aws lambda create-function \
   --timeout 300 \
   --memory-size 256 \
   --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz \
-  --environment Variables="{REGION=ap-northeast-2}" \
   --region ap-northeast-2
 
-# get_cloudwatch_metrics_raw
+# get_cloudwatch_metrics_raw (boto3만 사용)
 cd lambda-functions/get_cloudwatch_metrics_raw
-zip -r get_cloudwatch_metrics_raw.zip handler.py
+zip get_cloudwatch_metrics_raw.zip handler.py
 aws lambda create-function \
   --function-name db-assistant-get-cloudwatch-metrics-raw-dev \
   --runtime python3.11 \
@@ -926,15 +1049,16 @@ aws lambda create-function \
   --zip-file fileb://get_cloudwatch_metrics_raw.zip \
   --timeout 300 \
   --memory-size 512 \
-  --environment Variables="{REGION=ap-northeast-2}" \
   --region ap-northeast-2
 ```
 
-**참고**: `get_cloudwatch_metrics_raw`는 RDS에 직접 연결하지 않으므로 VPC 설정이 필요 없습니다.
+**참고**:
+- `get_cloudwatch_metrics_raw`는 RDS에 직접 연결하지 않으므로 VPC 설정이 필요 없습니다.
+- boto3는 Lambda 런타임에 기본 포함되어 있어 별도 Layer가 필요 없습니다.
 
 ---
 
-### 4. AWS Credentials 설정
+### 5. AWS Credentials 설정
 
 ```bash
 # AWS credentials 구성
