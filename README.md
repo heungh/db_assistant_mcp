@@ -67,7 +67,7 @@
 - **EC2**: 복잡한 분석 (Pandas, Numpy, Scikit-learn), AI 통합 (Bedrock)
 - **S3**: 리포트 저장 및 presigned URL 제공 (7일 유효)
 
-### 2. 모듈화된 구조 (Week 1~4 리팩토링 완료)
+### 2. 모듈화된 구조 
 - `modules/lambda_client.py` - Lambda 함수 호출 관리
 - `modules/cloudwatch_manager.py` - CloudWatch 메트릭 수집 및 분석
 - `modules/report_generator.py` - HTML/CSV 리포트 생성
